@@ -30,7 +30,7 @@ public class User {
     private String email;
 
     private ZonedDateTime createdAt;
-    private String password;
+    private String passwordHash;
 
     private String roles;
     private boolean enabled;
