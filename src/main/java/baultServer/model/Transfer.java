@@ -31,7 +31,7 @@ public class Transfer {
 
     private String originPath;
     private String destinationPath;
-    private Long size;
+    private Long sizeBytes;
     private ZonedDateTime createdAt;
 
     @ManyToOne(fetch = FetchType.LAZY)

@@ -1,0 +1,92 @@
+2026-07-26 23:10:05.965518+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "drop table if exists [*]user cascade "; se esperaba "identifier"
+Syntax error in SQL statement "drop table if exists [*]user cascade "; expected "identifier"; SQL statement:
+drop table if exists user cascade  [42001-240]
+2026-07-26 23:10:05.983521+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "create table [*]user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id))"; se esperaba "identifier"
+Syntax error in SQL statement "create table [*]user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id))"; expected "identifier"; SQL statement:
+create table user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id)) [42001-240]
+2026-07-26 23:10:05.986520+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references user [42001-240]
+2026-07-26 23:10:05.989521+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references user [42001-240]
+2026-07-26 23:10:05.990521+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references user [42001-240]
+2026-07-26 23:10:06.003030+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references user [42001-240]
+2026-07-26 23:10:06.007031+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists [*]user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists [*]user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan"; expected "identifier"; SQL statement:
+alter table if exists user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan [42001-240]
+2026-07-26 23:17:26.655832+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "drop table if exists [*]user cascade "; se esperaba "identifier"
+Syntax error in SQL statement "drop table if exists [*]user cascade "; expected "identifier"; SQL statement:
+drop table if exists user cascade  [42001-240]
+2026-07-26 23:17:27.097886+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "drop table if exists [*]user cascade "; se esperaba "identifier"
+Syntax error in SQL statement "drop table if exists [*]user cascade "; expected "identifier"; SQL statement:
+drop table if exists user cascade  [42001-240]
+2026-07-26 23:17:27.106891+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "create table [*]user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id))"; se esperaba "identifier"
+Syntax error in SQL statement "create table [*]user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id))"; expected "identifier"; SQL statement:
+create table user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id)) [42001-240]
+2026-07-26 23:17:27.108891+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references user [42001-240]
+2026-07-26 23:17:27.110890+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references user [42001-240]
+2026-07-26 23:17:27.111891+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references user [42001-240]
+2026-07-26 23:17:27.115890+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references user [42001-240]
+2026-07-26 23:17:27.118890+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists [*]user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists [*]user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan"; expected "identifier"; SQL statement:
+alter table if exists user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan [42001-240]
+2026-07-26 23:17:57.785292+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "drop table if exists [*]user cascade "; se esperaba "identifier"
+Syntax error in SQL statement "drop table if exists [*]user cascade "; expected "identifier"; SQL statement:
+drop table if exists user cascade  [42001-240]
+2026-07-26 23:17:58.177376+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "drop table if exists [*]user cascade "; se esperaba "identifier"
+Syntax error in SQL statement "drop table if exists [*]user cascade "; expected "identifier"; SQL statement:
+drop table if exists user cascade  [42001-240]
+2026-07-26 23:17:58.187376+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "create table [*]user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id))"; se esperaba "identifier"
+Syntax error in SQL statement "create table [*]user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id))"; expected "identifier"; SQL statement:
+create table user (birth_date date, enabled boolean not null, billing_plan_id bigint, created_at timestamp(6) with time zone, id bigint not null, email varchar(254) not null unique, first_name varchar(255), last_name varchar(255), password_hash varchar(255) not null, roles varchar(255), primary key (id)) [42001-240]
+2026-07-26 23:17:58.189375+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists bug_report add constraint FK9awt2hmtt53kp0bctbv21epvk foreign key (reported_by_user_id) references user [42001-240]
+2026-07-26 23:17:58.191375+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists credential add constraint FKpg7bdnqxpyhrt7f8soul9y7ne foreign key (user_id) references user [42001-240]
+2026-07-26 23:17:58.192375+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists device add constraint FKk92m2qj36vn62ctp5pgbt4982 foreign key (user_id) references user [42001-240]
+2026-07-26 23:17:58.195378+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references [*]user"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references [*]user"; expected "identifier"; SQL statement:
+alter table if exists refresh_token add constraint FKfgk1klcib7i15utalmcqo7krt foreign key (user_id) references user [42001-240]
+2026-07-26 23:17:58.198379+02:00 jdbc[3]: exception
+org.h2.jdbc.JdbcSQLSyntaxErrorException: Error de Sintaxis en sentencia SQL "alter table if exists [*]user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan"; se esperaba "identifier"
+Syntax error in SQL statement "alter table if exists [*]user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan"; expected "identifier"; SQL statement:
+alter table if exists user add constraint FK1w4goilijf8e0r3tumk5lfut7 foreign key (billing_plan_id) references billing_plan [42001-240]
