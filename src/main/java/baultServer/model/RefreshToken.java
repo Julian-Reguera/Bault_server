@@ -20,7 +20,8 @@ import lombok.Data;
 // Index para agilizar la búsqueda de tockens
 @Table(indexes = {
         @Index(name = "idx_refresh_token_hash", columnList = "tokenHash", unique = true),
-        @Index(name = "idx_refresh_user", columnList = "user_id")
+        @Index(name = "idx_refresh_user", columnList = "user_id"),
+        @Index(name = "idx_refresh_device", columnList = "device_id")
 })
 public class RefreshToken {
     @Id
@@ -31,6 +32,10 @@ public class RefreshToken {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "device_id", nullable = false)
+    private Device device;
 
     @Column(nullable = false, unique = true, length = 64)
     private String tokenHash;

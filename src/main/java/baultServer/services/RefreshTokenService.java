@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.model.Device;
 import baultServer.model.RefreshToken;
 import baultServer.model.User;
 import baultServer.repositorys.RefreshTokenRepository;
@@ -34,10 +35,11 @@ public class RefreshTokenService {
     }
 
     @Transactional
-    public String issue(User user) {
+    public String issue(User user, Device device) {
         String raw = generateRawToken();
         RefreshToken entity = new RefreshToken();
         entity.setUser(user);
+        entity.setDevice(device);
         entity.setTokenHash(hash(raw));
         entity.setCreatedAt(ZonedDateTime.now());
         entity.setExpiresAt(ZonedDateTime.now().plusNanos(expirationMs * 1_000_000L));
@@ -48,8 +50,8 @@ public class RefreshTokenService {
 
     /**
      * Validates the presented raw refresh token, revokes it, and issues a new one.
-     * If the token was already revoked, revokes every refresh for that user
-     * (reuse detection: assume compromise, force re-login on all sessions).
+     * If the token was already revoked, revokes every refresh for that device
+     * (reuse detection: assume compromise, force re-login on that device).
      */
     @Transactional
     public Rotated rotate(String rawToken) {
@@ -57,7 +59,7 @@ public class RefreshTokenService {
                 .orElseThrow(() -> unauthorized("Invalid refresh token"));
 
         if (current.isRevoked()) {
-            repository.revokeAllByUser(current.getUser());
+            repository.revokeAllByDevice(current.getDevice());
             throw unauthorized("Refresh token reuse detected");
         }
 
@@ -68,8 +70,8 @@ public class RefreshTokenService {
         current.setRevoked(true);
         repository.save(current);
 
-        String newRaw = issue(current.getUser());
-        return new Rotated(current.getUser(), newRaw);
+        String newRaw = issue(current.getUser(), current.getDevice());
+        return new Rotated(current.getUser(), current.getDevice(), newRaw);
     }
 
     @Transactional
@@ -105,5 +107,5 @@ public class RefreshTokenService {
         return new ResponseStatusException(HttpStatus.UNAUTHORIZED, msg);
     }
 
-    public record Rotated(User user, String rawToken) {}
+    public record Rotated(User user, Device device, String rawToken) {}
 }

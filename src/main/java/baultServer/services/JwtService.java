@@ -28,7 +28,7 @@ public class JwtService {
         this.expirationMs = expirationMs;
     }
 
-    public String generateToken(UserDetails user) {
+    public String generateToken(UserDetails user, Long deviceId) {
         long now = System.currentTimeMillis();
         List<String> roles = user.getAuthorities().stream()
                 .map(GrantedAuthority::getAuthority)
@@ -36,6 +36,7 @@ public class JwtService {
         return Jwts.builder()
                 .subject(user.getUsername())
                 .claim("roles", roles)
+                .claim("did", deviceId)
                 .issuedAt(new Date(now))
                 .expiration(new Date(now + expirationMs))
                 .signWith(key)
@@ -44,6 +45,12 @@ public class JwtService {
 
     public String extractUsername(String token) {
         return parse(token).getSubject();
+    }
+
+    public Long extractDeviceId(String token) {
+        Object did = parse(token).get("did");
+        if (did == null) return null;
+        return ((Number) did).longValue();
     }
 
     public boolean isValid(String token, UserDetails user) {
