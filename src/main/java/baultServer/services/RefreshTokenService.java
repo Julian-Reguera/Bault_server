@@ -67,6 +67,11 @@ public class RefreshTokenService {
             throw unauthorized("Refresh token expired");
         }
 
+        if (!current.getDevice().isEnabled()) {
+            repository.revokeAllByDevice(current.getDevice());
+            throw unauthorized("Device disabled");
+        }
+
         current.setRevoked(true);
         repository.save(current);
 
