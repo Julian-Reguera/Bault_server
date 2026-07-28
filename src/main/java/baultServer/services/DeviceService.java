@@ -6,6 +6,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.ZonedDateTime;
 import java.util.Base64;
+import java.util.List;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -14,6 +15,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import baultServer.model.Device;
 import baultServer.model.User;
+import baultServer.repositorys.DevicePresenceRepository;
 import baultServer.repositorys.DeviceRepository;
 
 @Service
@@ -23,9 +25,30 @@ public class DeviceService {
     private static final int RAW_SECRET_BYTES = 32;
 
     private final DeviceRepository repository;
+    private final DevicePresenceRepository presenceRepository;
 
-    public DeviceService(DeviceRepository repository) {
+    public DeviceService(DeviceRepository repository, DevicePresenceRepository presenceRepository) {
         this.repository = repository;
+        this.presenceRepository = presenceRepository;
+    }
+
+    public List<Device> findByUser(User user) {
+        return repository.findByUser(user);
+    }
+
+    public Device findByIdAndUser(Long deviceId, User user) {
+        return repository.findByIdAndUser(deviceId, user)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Device not found"));
+    }
+
+    public List<Device.Transfer> findByUserWithPresence(User user) {
+        return repository.findByUser(user).stream()
+                .map(d -> {
+                    Device.Transfer t = d.toTransfer();
+                    t.setOnline(presenceRepository.isOnline(d.getId()));
+                    return t;
+                })
+                .toList();
     }
 
     @Transactional

@@ -55,4 +55,6 @@ public class User {
 
     @OneToMany(mappedBy = "user")
     private List<Device> linkedDevices;
+
+    
 }

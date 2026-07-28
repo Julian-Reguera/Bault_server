@@ -10,14 +10,16 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
+import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.Getter;
 
 @Entity
 @Data
 @Table(indexes = {
         @Index(name = "idx_folder_device", columnList = "device_id")
 })
-public class Folder {
+public class Folder implements Transferable<Folder.Transfer> {
     @Id
     @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "gen")
     @SequenceGenerator(name = "gen", sequenceName = "gen")
@@ -42,4 +44,19 @@ public class Folder {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "device_id", nullable = false)
     private Device device;
+
+    @Override
+    public Transfer toTransfer() {
+        return new Transfer(id, path, enabled, shared, device.getId());
+    }
+
+    @Getter
+    @AllArgsConstructor
+    public static class Transfer {
+        private Long id;
+        private String path;
+        private boolean enabled;
+        private boolean shared;
+        private Long deviceId;
+    }
 }

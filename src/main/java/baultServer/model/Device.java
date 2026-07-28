@@ -15,14 +15,17 @@ import jakarta.persistence.ManyToOne;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
+import lombok.AllArgsConstructor;
 import lombok.Data;
+import lombok.Getter;
+import lombok.Setter;
 
 @Entity
 @Data
 @Table(indexes = {
         @Index(name = "idx_device_user", columnList = "user_id")
 })
-public class Device {
+public class Device implements Transferable<Device.Transfer>{
     @Id
     @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "gen")
     @SequenceGenerator(name = "gen", sequenceName = "gen")
@@ -52,4 +55,22 @@ public class Device {
 
     @OneToMany(mappedBy = "receiver")
     private List<Transfer> receivedTransfers;
+
+    @Override
+    public Transfer toTransfer() {
+        return new Transfer(id, alias, operatingSystem, appVersion, lastConnection, trusted,false);
+    }
+
+    @Getter
+    @Setter
+    @AllArgsConstructor
+    public static class Transfer {
+        private Long id;
+        private String alias;
+        private String operatingSystem;
+        private String appVersion;
+        private ZonedDateTime lastConnection;
+        private boolean trusted;
+        private boolean online;
+    }
 }
