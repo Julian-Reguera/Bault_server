@@ -11,20 +11,11 @@ import org.springframework.messaging.support.ChannelInterceptor;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Component;
 
-import baultServer.model.Device;
-import baultServer.repositorys.DeviceRepository;
-
 @Component
 public class StompAuthChannelInterceptor implements ChannelInterceptor {
 
     private static final String DEVICE_QUEUE_PREFIX = "/queue/device.";
     private static final String APP_DESTINATION_PREFIX = "/app/";
-
-    private final DeviceRepository deviceRepository;
-
-    public StompAuthChannelInterceptor(DeviceRepository deviceRepository) {
-        this.deviceRepository = deviceRepository;
-    }
 
     @Override
     public Message<?> preSend(Message<?> message, MessageChannel channel) {
@@ -53,12 +44,6 @@ public class StompAuthChannelInterceptor implements ChannelInterceptor {
         Long sessionDeviceId = deviceIdOf(accessor);
         if (sessionDeviceId == null) {
             throw new AccessDeniedException("Missing device in session");
-        }
-
-        Device device = deviceRepository.findById(sessionDeviceId).orElse(null);
-        if (device == null || !device.isEnabled()) {
-            throw new AccessDeniedException(
-                    "Device " + sessionDeviceId + " is disabled");
         }
 
         if (destination.startsWith(DEVICE_QUEUE_PREFIX)) {

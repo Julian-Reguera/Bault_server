@@ -9,22 +9,18 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.WebSocketHandler;
 import org.springframework.web.socket.server.HandshakeInterceptor;
 
-import baultServer.model.Device;
-import baultServer.repositorys.DeviceRepository;
 import baultServer.services.JwtService;
 import io.jsonwebtoken.JwtException;
 
 @Component
 public class JwtHandshakeInterceptor implements HandshakeInterceptor {
 
-    static final String DEVICE_ID_ATTR = "deviceId";
+    public static final String DEVICE_ID_ATTR = "deviceId";
 
     private final JwtService jwtService;
-    private final DeviceRepository deviceRepository;
 
-    public JwtHandshakeInterceptor(JwtService jwtService, DeviceRepository deviceRepository) {
+    public JwtHandshakeInterceptor(JwtService jwtService) {
         this.jwtService = jwtService;
-        this.deviceRepository = deviceRepository;
     }
 
     @Override
@@ -45,12 +41,6 @@ public class JwtHandshakeInterceptor implements HandshakeInterceptor {
         }
         if (deviceId == null) {
             response.setStatusCode(HttpStatus.UNAUTHORIZED);
-            return false;
-        }
-
-        Device device = deviceRepository.findById(deviceId).orElse(null);
-        if (device == null || !device.isEnabled()) {
-            response.setStatusCode(HttpStatus.FORBIDDEN);
             return false;
         }
 

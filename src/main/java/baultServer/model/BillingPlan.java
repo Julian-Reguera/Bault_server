@@ -21,6 +21,7 @@ public class BillingPlan {
     private int maxSpeed;
     private int maxTraffic;
     private int maxDevices;
+    private int maxConcurrentTransfers;
     private int monthlyPrice; //dinero en centimos (evita redondeos)
     private int annualPrice;  //dinero en centimos (evita redondeos)
     private boolean enabled;

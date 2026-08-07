@@ -20,6 +20,8 @@ import jakarta.servlet.http.HttpServletResponse;
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
+    public static final String DEVICE_ID_ATTR = "bault.deviceId";
+
     private final JwtService jwtService;
     private final UserDetailsService userDetailsService;
 
@@ -47,6 +49,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                             user, null, user.getAuthorities());
                     auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                     SecurityContextHolder.getContext().setAuthentication(auth);
+                    Long deviceId = jwtService.extractDeviceId(token);
+                    if (deviceId != null) {
+                        request.setAttribute(DEVICE_ID_ATTR, deviceId);
+                    }
                 }
             }
         } catch (JwtException | IllegalArgumentException ignored) {

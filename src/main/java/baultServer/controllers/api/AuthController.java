@@ -1,4 +1,4 @@
-package baultServer.controllers;
+package baultServer.controllers.api;
 
 import java.time.ZonedDateTime;
 
