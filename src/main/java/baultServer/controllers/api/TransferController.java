@@ -35,7 +35,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
-import baultServer.configs.JwtAuthenticationFilter;
+import baultServer.configs.http.JwtAuthenticationFilter;
 import baultServer.model.BillingPlan;
 import baultServer.model.Device;
 import baultServer.model.Folder;

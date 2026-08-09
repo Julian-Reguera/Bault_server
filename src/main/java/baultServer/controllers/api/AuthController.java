@@ -35,6 +35,7 @@ import baultServer.services.RefreshTokenService.Rotated;
 
 import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.CONFLICT;
+import static org.springframework.http.HttpStatus.FORBIDDEN;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 @RestController
@@ -68,19 +69,28 @@ public class AuthController {
         this.emailCodeService = emailCodeService;
     }
 
-    @PostMapping("/login/password")
+    @PostMapping("/public/login/password")
     public ResponseEntity<ObjectNode> login(@RequestBody JsonNode body) {
         String email = requireText(body, "email");
         String password = requireText(body, "password");
         Long deviceId = optionalLong(body, "deviceId");
         String deviceSecret = optionalText(body, "deviceSecret");
 
-        //Autentifica con Spring Security (si fallan las credenciales lanza excepción)
+        //Autentifica con Spring Security (si fallan las credenciales lanza excepción -> 401)
         Authentication authResult = authManager.authenticate(
                 new UsernamePasswordAuthenticationToken(email, password));
         UserDetails principal = (UserDetails) authResult.getPrincipal();
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+
+        //Bloquea el login si el email no está verificado. Código distinto (403 con body estructurado)
+        //para que el cliente pueda diferenciarlo de credenciales incorrectas (401) y disparar el flujo de verificación.
+        if (!user.isEmailVerified()) {
+            ObjectNode err = JsonNodeFactory.instance.objectNode();
+            err.put("error", "email_not_verified");
+            err.put("email", user.getEmail());
+            return ResponseEntity.status(FORBIDDEN).body(err);
+        }
 
         //Verificación de dispositivo
         Device device = null;
@@ -108,10 +118,10 @@ public class AuthController {
 
         String access = jwtService.generateToken(principal, device.getId());
         String refresh = refreshTokenService.issue(user, device);
-        return ResponseEntity.ok(bearer(access, refresh, device.getId(), rawSecretToReturn, user.isEmailVerified()));
+        return ResponseEntity.ok(bearer(access, refresh, device.getId(), rawSecretToReturn));
     }
 
-    @PostMapping("/register/password")
+    @PostMapping("/public/register/password")
     public ResponseEntity<ObjectNode> register(@RequestBody JsonNode body) {
         String email = requireText(body, "email");
         String password = requireText(body, "password");
@@ -133,49 +143,42 @@ public class AuthController {
         u.setCreatedAt(ZonedDateTime.now());
         userRepository.save(u);
 
-        Registered reg = deviceService.register(
-                u,
-                optionalText(body, "alias"),
-                optionalText(body, "operatingSystem"),
-                optionalText(body, "appVersion"));
-
-        //Dispara el envío del código de verificación. Un fallo de entrega no rompe el registro:
-        //el cliente puede pedir un reenvío desde /email/verify/request tras hacer login.
+        //No emitimos tokens ni creamos device: el login exige email verificado, así que serían inservibles.
+        //El device se creará en el primer login válido, tras la verificación.
         try {
             emailCodeService.issueAndSend(u, EmailCode.Purpose.EMAIL_VERIFICATION);
         } catch (EmailDeliveryException ignored) {
-            //Log ya emitido por el service; el user existe y puede reintentar.
+            //Log ya emitido por el service; el cliente puede reintentar con /public/email/verify/request.
         }
 
-        UserDetails principal = userDetailsService.loadUserByUsername(email);
-        String access = jwtService.generateToken(principal, reg.device().getId());
-        String refresh = refreshTokenService.issue(u, reg.device());
-        return ResponseEntity.ok(bearer(access, refresh, reg.device().getId(), reg.rawSecret(), u.isEmailVerified()));
+        ObjectNode resp = JsonNodeFactory.instance.objectNode();
+        resp.put("email", u.getEmail());
+        resp.put("message", "verification_email_sent");
+        return ResponseEntity.accepted().body(resp);
     }
 
-    @PostMapping("/email/verify/request")
-    public ResponseEntity<Void> requestEmailVerification(@AuthenticationPrincipal UserDetails principal) {
-        if (principal == null) {
-            throw new ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED, "Authentication required");
-        }
-        User user = userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
-        if (user.isEmailVerified()) {
-            return ResponseEntity.noContent().build();
-        }
-        emailCodeService.issueAndSend(user, EmailCode.Purpose.EMAIL_VERIFICATION);
+    @PostMapping("/public/email/verify/request")
+    public ResponseEntity<Void> requestEmailVerification(@RequestBody JsonNode body) {
+        String email = requireText(body, "email");
+        //Respuesta constante para no filtrar existencia de la cuenta ni estado de verificación.
+        userRepository.findByEmail(email).ifPresent(user -> {
+            if (!user.isEmailVerified()) {
+                try {
+                    emailCodeService.issueAndSend(user, EmailCode.Purpose.EMAIL_VERIFICATION);
+                } catch (EmailDeliveryException ignored) {
+                    //Silencioso a propósito: mismo comportamiento visible que si el email no existe.
+                }
+            }
+        });
         return ResponseEntity.accepted().build();
     }
 
-    @PostMapping("/email/verify/confirm")
-    public ResponseEntity<Void> confirmEmailVerification(@AuthenticationPrincipal UserDetails principal,
-                                                         @RequestBody JsonNode body) {
-        if (principal == null) {
-            throw new ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED, "Authentication required");
-        }
+    @PostMapping("/public/email/verify/confirm")
+    public ResponseEntity<Void> confirmEmailVerification(@RequestBody JsonNode body) {
+        String email = requireText(body, "email");
         String code = requireText(body, "code");
-        User user = userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResponseStatusException(BAD_REQUEST, "Invalid code"));
         if (user.isEmailVerified()) {
             return ResponseEntity.noContent().build();
         }
@@ -185,7 +188,7 @@ public class AuthController {
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/password/reset/request")
+    @PostMapping("/public/password/reset/request")
     public ResponseEntity<Void> requestPasswordReset(@RequestBody JsonNode body) {
         String email = requireText(body, "email");
         //Respuesta constante para no filtrar existencia de la cuenta.
@@ -199,7 +202,7 @@ public class AuthController {
         return ResponseEntity.accepted().build();
     }
 
-    @PostMapping("/password/reset/confirm")
+    @PostMapping("/public/password/reset/confirm")
     public ResponseEntity<Void> confirmPasswordReset(@RequestBody JsonNode body) {
         String email = requireText(body, "email");
         String code = requireText(body, "code");
@@ -214,7 +217,7 @@ public class AuthController {
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/refresh")
+    @PostMapping("/public/refresh")
     public ResponseEntity<ObjectNode> refresh(@RequestBody JsonNode body) {
         String refreshToken = requireText(body, "refreshToken");
         Rotated rotated = refreshTokenService.rotate(refreshToken);
@@ -223,18 +226,17 @@ public class AuthController {
                 optionalText(body, "appVersion"));
         UserDetails principal = userDetailsService.loadUserByUsername(rotated.user().getEmail());
         String access = jwtService.generateToken(principal, rotated.device().getId());
-        return ResponseEntity.ok(bearer(access, rotated.rawToken(), rotated.device().getId(),
-                null, rotated.user().isEmailVerified()));
+        return ResponseEntity.ok(bearer(access, rotated.rawToken(), rotated.device().getId(), null));
     }
 
-    @PostMapping("/logout")
+    @PostMapping("/public/logout")
     public ResponseEntity<Void> logout(@RequestBody JsonNode body) {
         String refreshToken = requireText(body, "refreshToken");
         refreshTokenService.revoke(refreshToken);
         return ResponseEntity.noContent().build();
     }
 
-    @PostMapping("/logout-all")
+    @PostMapping("/secured/logout-all")
     public ResponseEntity<Void> logoutAll(@AuthenticationPrincipal UserDetails principal) {
         User user = userRepository.findByEmail(principal.getUsername())
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
@@ -243,13 +245,12 @@ public class AuthController {
     }
 
     private static ObjectNode bearer(String accessToken, String refreshToken, Long deviceId,
-                                     String deviceSecret, boolean emailVerified) {
+                                     String deviceSecret) {
         ObjectNode node = JsonNodeFactory.instance.objectNode();
         node.put("accessToken", accessToken);
         node.put("refreshToken", refreshToken);
         node.put("tokenType", "Bearer");
         node.put("deviceId", deviceId);
-        node.put("emailVerified", emailVerified);
         if (deviceSecret != null) {
             node.put("deviceSecret", deviceSecret);
         }

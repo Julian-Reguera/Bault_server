@@ -1,4 +1,4 @@
-package baultServer.configs;
+package baultServer.configs.ws;
 
 import java.util.Map;
 

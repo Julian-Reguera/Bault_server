@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-import baultServer.configs.JwtAuthenticationFilter;
+import baultServer.configs.http.JwtAuthenticationFilter;
 import jakarta.servlet.http.HttpServletRequest;
 
 import static org.springframework.http.HttpStatus.UNAUTHORIZED;

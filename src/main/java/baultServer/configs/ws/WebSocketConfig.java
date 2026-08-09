@@ -1,4 +1,4 @@
-package baultServer.configs;
+package baultServer.configs.ws;
 
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;

@@ -10,7 +10,7 @@ import org.springframework.stereotype.Controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
-import baultServer.configs.JwtHandshakeInterceptor;
+import baultServer.configs.ws.JwtHandshakeInterceptor;
 import baultServer.exceptions.DeviceDeniedException;
 import baultServer.services.PendingRequestService;
 
