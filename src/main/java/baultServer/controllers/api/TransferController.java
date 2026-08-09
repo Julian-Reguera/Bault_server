@@ -4,6 +4,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
@@ -23,6 +25,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
@@ -45,6 +48,11 @@ import baultServer.repositorys.TransferRepository;
 import baultServer.repositorys.UserRepository;
 import baultServer.exceptions.UploaderDenialException;
 import baultServer.repositorys.TransferPipeRepository;
+import baultServer.services.CryptoService;
+import baultServer.services.TransferHistoryService;
+import baultServer.services.TransferHistoryService.HistoryFilter;
+import baultServer.services.TransferHistoryService.HistoryPage;
+import baultServer.services.TransferHistoryService.StatusFilter;
 import baultServer.utils.streams.CountingOutputStream;
 import baultServer.utils.streams.StreamingPipe;
 import baultServer.utils.streams.ThrottledOutputStream;
@@ -78,6 +86,8 @@ public class TransferController {
     private final DevicePresenceRepository presenceRepository;
     private final TransferPipeRepository pipeRegistry;
     private final SimpMessagingTemplate messagingTemplate;
+    private final CryptoService cryptoService;
+    private final TransferHistoryService historyService;
     /** Techo global opcional (Mbps); 0 = sin techo global, se respeta solo el plan. */
     private final long serverCeilingBytesPerSecond;
 
@@ -88,6 +98,8 @@ public class TransferController {
                               DevicePresenceRepository presenceRepository,
                               TransferPipeRepository pipeRegistry,
                               SimpMessagingTemplate messagingTemplate,
+                              CryptoService cryptoService,
+                              TransferHistoryService historyService,
                               @Value("${bault.transfer.download.max-mbps:0}") double downloadMaxMbps) {
         this.userRepository = userRepository;
         this.deviceRepository = deviceRepository;
@@ -96,9 +108,85 @@ public class TransferController {
         this.presenceRepository = presenceRepository;
         this.pipeRegistry = pipeRegistry;
         this.messagingTemplate = messagingTemplate;
+        this.cryptoService = cryptoService;
+        this.historyService = historyService;
         this.serverCeilingBytesPerSecond = downloadMaxMbps <= 0 ? 0L
                 : (long) (downloadMaxMbps * BYTES_PER_MBPS);
     }
+
+    // ===================== Histórico =====================
+
+    /**
+     * Listado paginado del histórico con filtros server-side. Devuelve además los
+     * dropdowns de emisores/receptores para no necesitar un endpoint aparte.
+     */
+    @GetMapping(produces = "application/json")
+    @ResponseBody
+    public HistoryPage listHistory(@RequestParam(required = false, defaultValue = "all") String status,
+                                   @RequestParam(required = false) Long deviceId,
+                                   @RequestParam(required = false) Long senderId,
+                                   @RequestParam(required = false) Long receiverId,
+                                   @RequestParam(required = false) String q,
+                                   @RequestParam(required = false) String cursor,
+                                   @RequestParam(required = false) Integer size,
+                                   @AuthenticationPrincipal UserDetails principal) {
+        User user = currentUser(principal);
+        HistoryFilter filter = new HistoryFilter(parseStatus(status), deviceId, senderId, receiverId, q);
+        return historyService.list(user, filter, cursor, size);
+    }
+
+    /**
+     * Reintenta una transferencia previa creando una nueva en PENDING.
+     * Ver {@link TransferHistoryService#retry} para las comprobaciones estrictas.
+     */
+    @PostMapping(path = "/{transferId}/retry", produces = "application/json")
+    @ResponseBody
+    public Map<String, Object> retry(@PathVariable Long transferId,
+                                     @AuthenticationPrincipal UserDetails principal,
+                                     HttpServletRequest request) {
+        User user = currentUser(principal);
+        Device caller = currentDevice(request, user);
+        Transfer copy = historyService.retry(transferId, user, caller);
+        return Map.of("transferId", copy.getId());
+    }
+
+    /** Export CSV en streaming. Aplica los mismos filtros que el listado. */
+    @GetMapping(path = "/export-csv")
+    public ResponseEntity<StreamingResponseBody> exportCsv(
+            @RequestParam(required = false, defaultValue = "all") String status,
+            @RequestParam(required = false) Long deviceId,
+            @RequestParam(required = false) Long senderId,
+            @RequestParam(required = false) Long receiverId,
+            @RequestParam(required = false) String q,
+            @AuthenticationPrincipal UserDetails principal) {
+        User user = currentUser(principal);
+        HistoryFilter filter = new HistoryFilter(parseStatus(status), deviceId, senderId, receiverId, q);
+
+        String filename = "bault-historico-"
+                + java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE) + ".csv";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.parseMediaType("text/csv; charset=utf-8"));
+        headers.setContentDisposition(ContentDisposition.attachment()
+                .filename(filename, StandardCharsets.UTF_8).build());
+
+        StreamingResponseBody body = out -> {
+            java.io.Writer w = new java.io.OutputStreamWriter(out, StandardCharsets.UTF_8);
+            historyService.streamCsv(user, filter, w);
+        };
+        return ResponseEntity.ok().headers(headers).body(body);
+    }
+
+    private static StatusFilter parseStatus(String s) {
+        if (s == null || s.isBlank()) return StatusFilter.ALL;
+        try {
+            return StatusFilter.valueOf(s.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(BAD_REQUEST,
+                    "Invalid status filter (expected all|ok|active|failed): " + s);
+        }
+    }
+
+    // ===================== Solicitar transferencia =====================
 
     /**
      * El device actual (receiver) pide descargar un archivo que vive en una carpeta
@@ -127,7 +215,7 @@ public class TransferController {
             throw new ResponseStatusException(BAD_REQUEST, "Sender and receiver must differ");
         }
 
-        Folder originFolder = loadSharedFolder(originFolderId, sender, "Origin folder");
+        Folder originFolder = loadFolderWithPermission(originFolderId, sender, Folder.Sharing.READ, "Origin folder");
 
         if (!presenceRepository.isOnline(sender.getId())) {
             throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Sender device offline");
@@ -179,7 +267,8 @@ public class TransferController {
             throw new ResponseStatusException(BAD_REQUEST, "Sender and receiver must differ");
         }
 
-        Folder destinationFolder = loadSharedFolder(destinationFolderId, receiver, "Destination folder");
+        Folder destinationFolder = loadFolderWithPermission(destinationFolderId, receiver,
+                Folder.Sharing.READ_WRITE, "Destination folder");
 
         if (!presenceRepository.isOnline(receiver.getId())) {
             throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Receiver device offline");
@@ -204,6 +293,57 @@ public class TransferController {
         return Map.of("transferId", transfer.getId());
     }
 
+    /**
+     * Devuelve, para cada folder implicada en la transferencia, si esta cifrada y (solo
+     * para el device que la necesita) la DEK en claro para poder cifrar/descifrar en el
+     * cliente. El sender recibe la DEK del origin folder; el receiver la del destination.
+     */
+    @GetMapping(path = "/{transferId}/keys", produces = "application/json")
+    @ResponseBody
+    public ObjectNode transferKeys(@PathVariable Long transferId,
+                                   @AuthenticationPrincipal UserDetails principal,
+                                   HttpServletRequest request) {
+        User user = currentUser(principal);
+        Device caller = currentDevice(request, user);
+        Transfer transfer = transferRepository.findById(transferId)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Transfer not found"));
+        if (!transfer.getOwner().getUser().getId().equals(user.getId())) {
+            throw new ResponseStatusException(FORBIDDEN, "Transfer does not belong to user");
+        }
+        boolean isSender = transfer.getSender() != null
+                && caller.getId().equals(transfer.getSender().getId());
+        boolean isReceiver = transfer.getReceiver() != null
+                && caller.getId().equals(transfer.getReceiver().getId());
+        if (!isSender && !isReceiver) {
+            throw new ResponseStatusException(FORBIDDEN, "Only sender or receiver may fetch keys");
+        }
+
+        ObjectNode root = JsonNodeFactory.instance.objectNode();
+        root.set("origin", folderKeyNode(transfer.getOriginFolder(), isSender));
+        root.set("destination", folderKeyNode(transfer.getDestinationFolder(), isReceiver));
+        return root;
+    }
+
+    private ObjectNode folderKeyNode(Folder folder, boolean includeDek) {
+        ObjectNode node = JsonNodeFactory.instance.objectNode();
+        if (folder == null || folder.getWrappedDek() == null) {
+            node.put("encrypted", false);
+            return node;
+        }
+        node.put("encrypted", true);
+        node.put("algorithm", folder.getEncryptionAlgorithm());
+        if (includeDek) {
+            byte[] dek = cryptoService.unwrap(folder.getWrappedDek(), folder.getDekWrapIv(),
+                    folder.getKeyVersion(), folder.getId());
+            try {
+                node.put("dek", Base64.getEncoder().encodeToString(dek));
+            } finally {
+                Arrays.fill(dek, (byte) 0);
+            }
+        }
+        return node;
+    }
+
     /** Cancela una transferencia que aun no ha comenzado. Puede hacerlo cualquier device del usuario receiver. */
     @DeleteMapping("/{transferId}/cancel")
     public ResponseEntity<Void> cancel(@PathVariable Long transferId,
@@ -223,8 +363,9 @@ public class TransferController {
                     "Cannot cancel transfer in status " + transfer.getStatus());
         }
 
-        transfer.setStatus(Transfer.Status.FAILED);
+        transfer.setStatus(Transfer.Status.CANCELLED);
         transfer.setFailureReason("Cancelled by user");
+        transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
         return ResponseEntity.noContent().build();
     }
@@ -264,6 +405,7 @@ public class TransferController {
 
         transfer.setStatus(Transfer.Status.DENIED);
         transfer.setFailureReason("Denied by peer");
+        transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
 
         //Desbloquear al otro extremo si estaba esperando en el pipe (metadata o rendezvous).
@@ -318,6 +460,14 @@ public class TransferController {
 
         try {
             pipe.publishMetadata(filename, contentType, declaredSize);
+
+            //Avisar al receiver de que ya hay metadata publicada (util para la UI de descarga).
+            ObjectNode uploadStartedData = JsonNodeFactory.instance.objectNode();
+            uploadStartedData.put("transferId", transferId);
+            if (filename != null) uploadStartedData.put("filename", filename);
+            if (contentType != null) uploadStartedData.put("contentType", contentType);
+            if (declaredSize != null) uploadStartedData.put("sizeBytes", declaredSize);
+            notifyDevice(transfer.getReceiver().getId(), "transfer.upload-started", uploadStartedData);
 
             if (!pipe.awaitRendezvous(RENDEZVOUS_TIMEOUT_MS)) {
                 pipe.abort(new RuntimeException("Downloader did not arrive"));
@@ -394,6 +544,11 @@ public class TransferController {
             throw new ResponseStatusException(CONFLICT, "Download already in progress");
         }
 
+        //Avisar al sender de que el receiver ya esta en el pipe, para que lance su /upload.
+        ObjectNode downloadStartedData = JsonNodeFactory.instance.objectNode();
+        downloadStartedData.put("transferId", transferId);
+        notifyDevice(transfer.getSender().getId(), "transfer.download-started", downloadStartedData);
+
         StreamingPipe.Metadata meta;
         try {
             meta = pipe.awaitMetadata(METADATA_TIMEOUT_MS);
@@ -405,7 +560,7 @@ public class TransferController {
             HttpStatus status = switch (denied.getCode()) {
                 case FILE_NOT_FOUND -> HttpStatus.GONE;
                 case FOLDER_NOT_SHARED, ACCESS_DENIED -> HttpStatus.FORBIDDEN;
-                case FILE_TOO_LARGE -> HttpStatus.PAYLOAD_TOO_LARGE;
+                case FILE_TOO_LARGE -> HttpStatus.CONTENT_TOO_LARGE;
                 case OTHER -> HttpStatus.FAILED_DEPENDENCY;
             };
             throw new ResponseStatusException(status,
@@ -489,8 +644,8 @@ public class TransferController {
         if (!device.getUser().getId().equals(user.getId())) {
             throw new ResponseStatusException(FORBIDDEN, "Device does not belong to user");
         }
-        if (!device.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, "Device disabled");
+        if (device.getStatus() != Device.Status.ACTIVE) {
+            throw new ResponseStatusException(FORBIDDEN, "Device not active");
         }
         return device;
     }
@@ -506,6 +661,7 @@ public class TransferController {
 
     private void markCompleted(Transfer transfer) {
         transfer.setStatus(Transfer.Status.COMPLETED);
+        transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
     }
 
@@ -533,21 +689,31 @@ public class TransferController {
         if (!device.getUser().getId().equals(user.getId())) {
             throw new ResponseStatusException(FORBIDDEN, role + " device does not belong to user");
         }
-        if (!device.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, role + " device disabled");
+        if (device.getStatus() != Device.Status.ACTIVE) {
+            throw new ResponseStatusException(FORBIDDEN, role + " device not active");
         }
         return device;
     }
 
-    /** Carga una folder y valida que pertenece a {@code ownerDevice}, esta enabled y shared. */
-    private Folder loadSharedFolder(Long folderId, Device ownerDevice, String role) {
+    /**
+     * Carga una folder y valida que pertenece a {@code ownerDevice}, esta enabled y su nivel
+     * de sharing permite al menos {@code required}. READ para descargar de ella, READ_WRITE
+     * para escribir en ella.
+     */
+    private Folder loadFolderWithPermission(Long folderId, Device ownerDevice,
+                                            Folder.Sharing required, String role) {
         Folder folder = folderRepository.findById(folderId)
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, role + " not found"));
         if (!folder.getDevice().getId().equals(ownerDevice.getId())) {
             throw new ResponseStatusException(FORBIDDEN, role + " does not belong to the expected device");
         }
-        if (!folder.isEnabled() || !folder.isShared()) {
-            throw new ResponseStatusException(FORBIDDEN, role + " not shared");
+        if (!folder.isEnabled()) {
+            throw new ResponseStatusException(FORBIDDEN, role + " disabled");
+        }
+        Folder.Sharing current = folder.getSharing();
+        if (current == null || !current.allows(required)) {
+            throw new ResponseStatusException(FORBIDDEN,
+                    role + " requires " + required + " (current=" + current + ")");
         }
         return folder;
     }
@@ -591,6 +757,7 @@ public class TransferController {
         try {
             transfer.setStatus(Transfer.Status.FAILED);
             transfer.setSizeBytes(bytesTransferred);
+            transfer.setCompletedAt(ZonedDateTime.now());
             if (reason != null && !reason.isBlank()) {
                 String trimmed = reason.length() > 500 ? reason.substring(0, 500) : reason;
                 transfer.setFailureReason(trimmed);

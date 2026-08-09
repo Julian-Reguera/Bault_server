@@ -5,6 +5,8 @@ import java.util.List;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -26,17 +28,28 @@ import lombok.Setter;
         @Index(name = "idx_device_user", columnList = "user_id")
 })
 public class Device implements Transferable<Device.Transfer>{
+
+    public enum Status {
+        ACTIVE,
+        DISABLED,
+        BLOCKED,
+        REMOVED
+    }
+
     @Id
     @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "gen")
     @SequenceGenerator(name = "gen", sequenceName = "gen")
     private Long id;
 
-    private boolean enabled;
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16)
+    private Status status;
+
     private ZonedDateTime createdAt;
     private ZonedDateTime lastConnection;
+    private ZonedDateTime lastActivatedAt;
     private String operatingSystem;
     private String appVersion;
-    private boolean trusted;
 
     private String alias;
 
@@ -51,14 +64,14 @@ public class Device implements Transferable<Device.Transfer>{
     private List<Folder> ownedFolders;
 
     @OneToMany(mappedBy = "sender")
-    private List<Transfer> sentTransfers;
+    private List<baultServer.model.Transfer> sentTransfers;
 
     @OneToMany(mappedBy = "receiver")
-    private List<Transfer> receivedTransfers;
+    private List<baultServer.model.Transfer> receivedTransfers;
 
     @Override
     public Transfer toTransfer() {
-        return new Transfer(id, alias, operatingSystem, appVersion, lastConnection, trusted,false);
+        return new Transfer(id, alias, operatingSystem, appVersion, lastConnection, status, lastActivatedAt, false);
     }
 
     @Getter
@@ -70,7 +83,8 @@ public class Device implements Transferable<Device.Transfer>{
         private String operatingSystem;
         private String appVersion;
         private ZonedDateTime lastConnection;
-        private boolean trusted;
+        private Status status;
+        private ZonedDateTime lastActivatedAt;
         private boolean online;
     }
 }

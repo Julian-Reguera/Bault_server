@@ -13,4 +13,6 @@ public interface DeviceRepository extends JpaRepository<Device, Long> {
     Optional<Device> findByIdAndUser(Long id, User user);
 
     List<Device> findByUser(User user);
+
+    long countByUserAndStatus(User user, Device.Status status);
 }

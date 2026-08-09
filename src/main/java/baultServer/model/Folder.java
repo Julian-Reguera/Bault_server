@@ -1,6 +1,9 @@
 package baultServer.model;
 
+import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -28,9 +31,24 @@ public class Folder implements Transferable<Folder.Transfer> {
     private String path;
     private boolean enabled;
 
-    // Si es true, cualquier device del mismo usuario puede verla y editarla.
-    // Si es false, solo el device propietario.
-    private boolean shared;
+    /**
+     * Nivel de comparticion frente a otros devices del mismo usuario:
+     * - NONE: solo el device propietario la ve/edita.
+     * - READ: otros devices del user pueden leerla (descargar de ella).
+     * - READ_WRITE: otros devices del user pueden leer y escribir (subirle archivos).
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16)
+    private Sharing sharing = Sharing.NONE;
+
+    public enum Sharing {
+        NONE, READ, READ_WRITE;
+
+        /** true si este nivel concede al menos los permisos de {@code required}. */
+        public boolean allows(Sharing required) {
+            return required != null && this.ordinal() >= required.ordinal();
+        }
+    }
 
     // clave de cifrado de la carpeta, cifrada con la master key del servidor
     private byte[] wrappedDek;
@@ -47,7 +65,8 @@ public class Folder implements Transferable<Folder.Transfer> {
 
     @Override
     public Transfer toTransfer() {
-        return new Transfer(id, path, enabled, shared, device.getId());
+        return new Transfer(id, path, enabled, sharing == null ? Sharing.NONE : sharing,
+                wrappedDek != null, device.getId());
     }
 
     @Getter
@@ -56,7 +75,8 @@ public class Folder implements Transferable<Folder.Transfer> {
         private Long id;
         private String path;
         private boolean enabled;
-        private boolean shared;
+        private Sharing sharing;
+        private boolean encrypted;
         private Long deviceId;
     }
 }

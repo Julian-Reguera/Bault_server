@@ -10,7 +10,9 @@ import baultServer.model.User;
 
 public interface FolderRepository extends JpaRepository<Folder, Long> {
 
-    List<Folder> findByDeviceAndSharedTrue(Device device);
+    List<Folder> findByDeviceAndSharingNot(Device device, Folder.Sharing sharing);
 
-    List<Folder> findByDeviceUserAndSharedTrue(User user);
+    List<Folder> findByDeviceUserAndSharingNot(User user, Folder.Sharing sharing);
+
+    List<Folder> findByDeviceUserAndDeviceNotAndSharingNot(User user, Device device, Folder.Sharing sharing);
 }

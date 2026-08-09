@@ -5,13 +5,23 @@ import java.util.Map;
 
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+
+import baultServer.configs.JwtAuthenticationFilter;
+import jakarta.servlet.http.HttpServletRequest;
+
+import static org.springframework.http.HttpStatus.UNAUTHORIZED;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
@@ -24,6 +34,7 @@ import baultServer.services.DeviceRpcService;
 import baultServer.services.DeviceService;
 import baultServer.services.FolderService;
 
+import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.FORBIDDEN;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
@@ -49,45 +60,24 @@ public class ApiController {
         this.deviceRpcService = deviceRpcService;
     }
 
-    @GetMapping(path = "/users/{userId}/devices", produces = "application/json")
+    @GetMapping(path = "/folders", produces = "application/json")
     @ResponseBody
-    public Map<String, Object> listDevices(@PathVariable Long userId,
-                                           @AuthenticationPrincipal UserDetails principal) {
-        User user = userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
-        if (!user.getId().equals(userId)) {
-            throw new ResponseStatusException(FORBIDDEN, "User mismatch");
-        }
-
-        Map<String, Object> resultado = new HashMap<>();
-        resultado.put("devices", deviceService.findByUserWithPresence(user));
-        return resultado;
-    }
-
-    @GetMapping(path = "/users/{userId}/folders", produces = "application/json")
-    @ResponseBody
-    public Map<String, Object> listUserSharedFolders(@PathVariable Long userId,
-                                                     @AuthenticationPrincipal UserDetails principal) {
-        User user = userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
-        if (!user.getId().equals(userId)) {
-            throw new ResponseStatusException(FORBIDDEN, "User mismatch");
-        }
-
+    public Map<String, Object> listUserSharedFolders(@AuthenticationPrincipal UserDetails principal) {
+        User user = currentUser(principal);
         Map<String, Object> resultado = new HashMap<>();
         resultado.put("folders", folderService.findSharedByUser(user));
         return resultado;
     }
 
-    @GetMapping(path = "/devices/{deviceId}/folders", produces = "application/json")
+    @GetMapping(path = "/folders/device/{deviceId}", produces = "application/json")
     @ResponseBody
     public Map<String, Object> listSharedFolders(@PathVariable Long deviceId,
                                                  @AuthenticationPrincipal UserDetails principal) {
         User user = userRepository.findByEmail(principal.getUsername())
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
         Device device = deviceService.findByIdAndUser(deviceId, user);
-        if (!device.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, "Device disabled");
+        if (device.getStatus() != Device.Status.ACTIVE) {
+            throw new ResponseStatusException(FORBIDDEN, "Device not active");
         }
 
         Map<String, Object> resultado = new HashMap<>();
@@ -95,7 +85,103 @@ public class ApiController {
         return resultado;
     }
 
-    @GetMapping(path = "/folders/{folderId}/entries", produces = "application/json")
+    @PostMapping(path = "/folders", consumes = "application/json", produces = "application/json")
+    @ResponseBody
+    public Folder.Transfer createFolder(@RequestBody JsonNode body,
+                                        @AuthenticationPrincipal UserDetails principal,
+                                        HttpServletRequest request) {
+        User user = currentUser(principal);
+        Device caller = requireCallerDevice(user, request);
+
+        JsonNode pathNode = body == null ? null : body.get("path");
+        if (pathNode == null || pathNode.isNull() || !pathNode.isTextual() || pathNode.asText().isBlank()) {
+            throw new ResponseStatusException(BAD_REQUEST, "Missing or invalid field: path");
+        }
+        Folder.Sharing sharing = parseSharing(body.get("sharing"), Folder.Sharing.NONE);
+        boolean encrypted = body.hasNonNull("encrypted") && body.get("encrypted").asBoolean(false);
+        return folderService.create(caller, pathNode.asText(), sharing, encrypted).toTransfer();
+    }
+
+    @GetMapping(path = "/folders/shared-with-me", produces = "application/json")
+    @ResponseBody
+    public Map<String, Object> listFoldersSharedWithMe(@AuthenticationPrincipal UserDetails principal,
+                                                       HttpServletRequest request) {
+        User user = currentUser(principal);
+        Device caller = requireCallerDevice(user, request);
+        Map<String, Object> resultado = new HashMap<>();
+        resultado.put("folders", folderService.findSharedWithDevice(user, caller));
+        return resultado;
+    }
+
+    @DeleteMapping(path = "/folders/{folderId}")
+    public ResponseEntity<Void> deleteFolder(@PathVariable Long folderId,
+                                             @AuthenticationPrincipal UserDetails principal,
+                                             HttpServletRequest request) {
+        User user = currentUser(principal);
+        Folder folder = loadFolderOwnedByCaller(folderId, user, request);
+        folderService.unshare(folder);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PatchMapping(path = "/folders/{folderId}", consumes = "application/json", produces = "application/json")
+    @ResponseBody
+    public Folder.Transfer updateFolderSharing(@PathVariable Long folderId,
+                                               @RequestBody JsonNode body,
+                                               @AuthenticationPrincipal UserDetails principal,
+                                               HttpServletRequest request) {
+        User user = currentUser(principal);
+        Folder folder = loadFolderOwnedByCaller(folderId, user, request);
+
+        JsonNode sharingNode = body == null ? null : body.get("sharing");
+        if (sharingNode == null || sharingNode.isNull()) {
+            throw new ResponseStatusException(BAD_REQUEST, "Missing field: sharing");
+        }
+        Folder.Sharing sharing = parseSharing(sharingNode, null);
+        if (sharing == null) {
+            throw new ResponseStatusException(BAD_REQUEST, "Invalid sharing value");
+        }
+        return folderService.updateSharing(folder, sharing).toTransfer();
+    }
+
+    private User currentUser(UserDetails principal) {
+        return userRepository.findByEmail(principal.getUsername())
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+    }
+
+    private Device requireCallerDevice(User user, HttpServletRequest request) {
+        Object attr = request.getAttribute(JwtAuthenticationFilter.DEVICE_ID_ATTR);
+        if (!(attr instanceof Long callerDeviceId)) {
+            throw new ResponseStatusException(UNAUTHORIZED, "Missing device in token");
+        }
+        return deviceService.findByIdAndUser(callerDeviceId, user);
+    }
+
+    private Folder loadFolderOwnedByCaller(Long folderId, User user, HttpServletRequest request) {
+        Folder folder = folderRepository.findById(folderId)
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Folder not found"));
+        if (!folder.getDevice().getUser().getId().equals(user.getId())) {
+            throw new ResponseStatusException(FORBIDDEN, "Folder does not belong to user");
+        }
+        Object attr = request.getAttribute(JwtAuthenticationFilter.DEVICE_ID_ATTR);
+        if (!(attr instanceof Long callerDeviceId)) {
+            throw new ResponseStatusException(UNAUTHORIZED, "Missing device in token");
+        }
+        if (!callerDeviceId.equals(folder.getDevice().getId())) {
+            throw new ResponseStatusException(FORBIDDEN, "Only the owner device may modify this folder");
+        }
+        return folder;
+    }
+
+    private static Folder.Sharing parseSharing(JsonNode node, Folder.Sharing fallback) {
+        if (node == null || node.isNull() || !node.isTextual()) return fallback;
+        try {
+            return Folder.Sharing.valueOf(node.asText().trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return fallback;
+        }
+    }
+
+    @GetMapping(path = "/folders/browse/{folderId}", produces = "application/json")
     @ResponseBody
     public Map<String, Object> listFolderEntries(@PathVariable Long folderId,
                                                  @RequestParam(required = false) String path,
@@ -110,8 +196,9 @@ public class ApiController {
         if (!ownerDevice.getUser().getId().equals(user.getId())) {
             throw new ResponseStatusException(FORBIDDEN, "Folder does not belong to user");
         }
-        if (!folder.isEnabled() || !folder.isShared()) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder not shared");
+        if (!folder.isEnabled() || folder.getSharing() == null
+                || !folder.getSharing().allows(Folder.Sharing.READ)) {
+            throw new ResponseStatusException(FORBIDDEN, "Folder not readable");
         }
 
         String safePath = normalizeSubPath(path);

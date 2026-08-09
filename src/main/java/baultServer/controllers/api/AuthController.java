@@ -21,10 +21,14 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import baultServer.model.Device;
+import baultServer.model.EmailCode;
 import baultServer.model.User;
 import baultServer.repositorys.UserRepository;
+import baultServer.exceptions.DeviceRemovedException;
+import baultServer.exceptions.EmailDeliveryException;
 import baultServer.services.DeviceService;
 import baultServer.services.DeviceService.Registered;
+import baultServer.services.EmailCodeService;
 import baultServer.services.JwtService;
 import baultServer.services.RefreshTokenService;
 import baultServer.services.RefreshTokenService.Rotated;
@@ -44,6 +48,7 @@ public class AuthController {
     private final JwtService jwtService;
     private final RefreshTokenService refreshTokenService;
     private final DeviceService deviceService;
+    private final EmailCodeService emailCodeService;
 
     public AuthController(AuthenticationManager authManager,
                           UserDetailsService userDetailsService,
@@ -51,7 +56,8 @@ public class AuthController {
                           PasswordEncoder passwordEncoder,
                           JwtService jwtService,
                           RefreshTokenService refreshTokenService,
-                          DeviceService deviceService) {
+                          DeviceService deviceService,
+                          EmailCodeService emailCodeService) {
         this.authManager = authManager;
         this.userDetailsService = userDetailsService;
         this.userRepository = userRepository;
@@ -59,6 +65,7 @@ public class AuthController {
         this.jwtService = jwtService;
         this.refreshTokenService = refreshTokenService;
         this.deviceService = deviceService;
+        this.emailCodeService = emailCodeService;
     }
 
     @PostMapping("/login/password")
@@ -76,23 +83,32 @@ public class AuthController {
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
 
         //Verificación de dispositivo
-        Device device;
+        Device device = null;
         String rawSecretToReturn = null;
+        String operatingSystem = optionalText(body, "operatingSystem");
+        String appVersion = optionalText(body, "appVersion");
         if (deviceId != null && deviceSecret != null) {
-            device = deviceService.verify(user, deviceId, deviceSecret);
-        } else {
+            try {
+                device = deviceService.verify(user, deviceId, deviceSecret);
+                device = deviceService.touchDeviceInfo(device, operatingSystem, appVersion);
+            } catch (DeviceRemovedException e) {
+                // El device viejo fue eliminado -> creamos uno nuevo transparentemente
+                device = null;
+            }
+        }
+        if (device == null) {
             Registered reg = deviceService.register(
                     user,
                     optionalText(body, "alias"),
-                    optionalText(body, "operatingSystem"),
-                    optionalText(body, "appVersion"));
+                    operatingSystem,
+                    appVersion);
             device = reg.device();
             rawSecretToReturn = reg.rawSecret();
         }
 
         String access = jwtService.generateToken(principal, device.getId());
         String refresh = refreshTokenService.issue(user, device);
-        return ResponseEntity.ok(bearer(access, refresh, device.getId(), rawSecretToReturn));
+        return ResponseEntity.ok(bearer(access, refresh, device.getId(), rawSecretToReturn, user.isEmailVerified()));
     }
 
     @PostMapping("/register/password")
@@ -113,6 +129,7 @@ public class AuthController {
         u.setLastName(lastName);
         u.setRoles("USER");
         u.setEnabled(true);
+        u.setEmailVerified(false);
         u.setCreatedAt(ZonedDateTime.now());
         userRepository.save(u);
 
@@ -122,19 +139,92 @@ public class AuthController {
                 optionalText(body, "operatingSystem"),
                 optionalText(body, "appVersion"));
 
+        //Dispara el envío del código de verificación. Un fallo de entrega no rompe el registro:
+        //el cliente puede pedir un reenvío desde /email/verify/request tras hacer login.
+        try {
+            emailCodeService.issueAndSend(u, EmailCode.Purpose.EMAIL_VERIFICATION);
+        } catch (EmailDeliveryException ignored) {
+            //Log ya emitido por el service; el user existe y puede reintentar.
+        }
+
         UserDetails principal = userDetailsService.loadUserByUsername(email);
         String access = jwtService.generateToken(principal, reg.device().getId());
         String refresh = refreshTokenService.issue(u, reg.device());
-        return ResponseEntity.ok(bearer(access, refresh, reg.device().getId(), reg.rawSecret()));
+        return ResponseEntity.ok(bearer(access, refresh, reg.device().getId(), reg.rawSecret(), u.isEmailVerified()));
+    }
+
+    @PostMapping("/email/verify/request")
+    public ResponseEntity<Void> requestEmailVerification(@AuthenticationPrincipal UserDetails principal) {
+        if (principal == null) {
+            throw new ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        User user = userRepository.findByEmail(principal.getUsername())
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+        if (user.isEmailVerified()) {
+            return ResponseEntity.noContent().build();
+        }
+        emailCodeService.issueAndSend(user, EmailCode.Purpose.EMAIL_VERIFICATION);
+        return ResponseEntity.accepted().build();
+    }
+
+    @PostMapping("/email/verify/confirm")
+    public ResponseEntity<Void> confirmEmailVerification(@AuthenticationPrincipal UserDetails principal,
+                                                         @RequestBody JsonNode body) {
+        if (principal == null) {
+            throw new ResponseStatusException(org.springframework.http.HttpStatus.UNAUTHORIZED, "Authentication required");
+        }
+        String code = requireText(body, "code");
+        User user = userRepository.findByEmail(principal.getUsername())
+                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+        if (user.isEmailVerified()) {
+            return ResponseEntity.noContent().build();
+        }
+        emailCodeService.verifyAndConsume(user, EmailCode.Purpose.EMAIL_VERIFICATION, code);
+        user.setEmailVerified(true);
+        userRepository.save(user);
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/password/reset/request")
+    public ResponseEntity<Void> requestPasswordReset(@RequestBody JsonNode body) {
+        String email = requireText(body, "email");
+        //Respuesta constante para no filtrar existencia de la cuenta.
+        userRepository.findByEmail(email).ifPresent(user -> {
+            try {
+                emailCodeService.issueAndSend(user, EmailCode.Purpose.PASSWORD_RESET);
+            } catch (EmailDeliveryException ignored) {
+                //Silencioso a propósito: mismo comportamiento visible que si el email no existe.
+            }
+        });
+        return ResponseEntity.accepted().build();
+    }
+
+    @PostMapping("/password/reset/confirm")
+    public ResponseEntity<Void> confirmPasswordReset(@RequestBody JsonNode body) {
+        String email = requireText(body, "email");
+        String code = requireText(body, "code");
+        String newPassword = requireText(body, "newPassword");
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new ResponseStatusException(BAD_REQUEST, "Invalid code"));
+        emailCodeService.verifyAndConsume(user, EmailCode.Purpose.PASSWORD_RESET, code);
+        user.setPasswordHash(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+        //Invalida todas las sesiones tras cambio de contraseña.
+        refreshTokenService.revokeAllForUser(user);
+        return ResponseEntity.noContent().build();
     }
 
     @PostMapping("/refresh")
     public ResponseEntity<ObjectNode> refresh(@RequestBody JsonNode body) {
         String refreshToken = requireText(body, "refreshToken");
         Rotated rotated = refreshTokenService.rotate(refreshToken);
+        deviceService.touchDeviceInfo(rotated.device(),
+                optionalText(body, "operatingSystem"),
+                optionalText(body, "appVersion"));
         UserDetails principal = userDetailsService.loadUserByUsername(rotated.user().getEmail());
         String access = jwtService.generateToken(principal, rotated.device().getId());
-        return ResponseEntity.ok(bearer(access, rotated.rawToken(), rotated.device().getId(), null));
+        return ResponseEntity.ok(bearer(access, rotated.rawToken(), rotated.device().getId(),
+                null, rotated.user().isEmailVerified()));
     }
 
     @PostMapping("/logout")
@@ -152,12 +242,14 @@ public class AuthController {
         return ResponseEntity.noContent().build();
     }
 
-    private static ObjectNode bearer(String accessToken, String refreshToken, Long deviceId, String deviceSecret) {
+    private static ObjectNode bearer(String accessToken, String refreshToken, Long deviceId,
+                                     String deviceSecret, boolean emailVerified) {
         ObjectNode node = JsonNodeFactory.instance.objectNode();
         node.put("accessToken", accessToken);
         node.put("refreshToken", refreshToken);
         node.put("tokenType", "Bearer");
         node.put("deviceId", deviceId);
+        node.put("emailVerified", emailVerified);
         if (deviceSecret != null) {
             node.put("deviceSecret", deviceSecret);
         }

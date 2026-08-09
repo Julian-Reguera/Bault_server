@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Optional;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -12,7 +13,7 @@ import baultServer.model.Device;
 import baultServer.model.Transfer;
 import baultServer.model.User;
 
-public interface TransferRepository extends JpaRepository<Transfer, Long> {
+public interface TransferRepository extends JpaRepository<Transfer, Long>, JpaSpecificationExecutor<Transfer> {
 
     /**
      * Suma los sizeBytes de todas las transferencias del usuario (como sender o receiver)
@@ -41,4 +42,20 @@ public interface TransferRepository extends JpaRepository<Transfer, Long> {
     List<Transfer> findByStatusAndCreatedAtBefore(Transfer.Status status, ZonedDateTime before);
 
     List<Transfer> findByStatus(Transfer.Status status);
+
+    /** Devices distintos que han sido sender en alguna transferencia del usuario. */
+    @Query("""
+           SELECT DISTINCT t.sender FROM Transfer t
+           WHERE t.owner.user = :user AND t.sender IS NOT NULL
+           ORDER BY t.sender.alias
+           """)
+    List<Device> distinctSendersForUser(@Param("user") User user);
+
+    /** Devices distintos que han sido receiver en alguna transferencia del usuario. */
+    @Query("""
+           SELECT DISTINCT t.receiver FROM Transfer t
+           WHERE t.owner.user = :user AND t.receiver IS NOT NULL
+           ORDER BY t.receiver.alias
+           """)
+    List<Device> distinctReceiversForUser(@Param("user") User user);
 }

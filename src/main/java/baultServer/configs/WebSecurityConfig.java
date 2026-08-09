@@ -8,6 +8,8 @@ import org.springframework.security.authentication.dao.DaoAuthenticationProvider
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManagers;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
@@ -32,7 +34,17 @@ class WebSecurityConfig {
             .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/api/auth/**").permitAll()
-                .anyRequest().authenticated()
+                .requestMatchers("/api/devices/**").access(AuthorizationManagers.allOf(
+                        AuthorityAuthorizationManager.hasAnyAuthority(
+                                JwtAuthenticationFilter.AUTH_DEVICE_ACTIVE,
+                                JwtAuthenticationFilter.AUTH_DEVICE_DISABLED),
+                        AuthorityAuthorizationManager.hasAuthority(
+                                JwtAuthenticationFilter.AUTH_EMAIL_VERIFIED)))
+                .anyRequest().access(AuthorizationManagers.allOf(
+                        AuthorityAuthorizationManager.hasAuthority(
+                                JwtAuthenticationFilter.AUTH_DEVICE_ACTIVE),
+                        AuthorityAuthorizationManager.hasAuthority(
+                                JwtAuthenticationFilter.AUTH_EMAIL_VERIFIED)))
             )
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 

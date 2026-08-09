@@ -67,9 +67,10 @@ public class RefreshTokenService {
             throw unauthorized("Refresh token expired");
         }
 
-        if (!current.getDevice().isEnabled()) {
+        Device.Status status = current.getDevice().getStatus();
+        if (status == Device.Status.BLOCKED || status == Device.Status.REMOVED) {
             repository.revokeAllByDevice(current.getDevice());
-            throw unauthorized("Device disabled");
+            throw unauthorized("Device " + status);
         }
 
         current.setRevoked(true);
@@ -90,6 +91,11 @@ public class RefreshTokenService {
     @Transactional
     public void revokeAllForUser(User user) {
         repository.revokeAllByUser(user);
+    }
+
+    @Transactional
+    public void revokeAllByDevice(Device device) {
+        repository.revokeAllByDevice(device);
     }
 
     private String generateRawToken() {

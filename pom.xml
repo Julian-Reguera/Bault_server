@@ -138,6 +138,12 @@
 			<version>0.12.6</version>
 			<scope>runtime</scope>
 		</dependency>
+
+		<dependency>
+			<groupId>com.resend</groupId>
+			<artifactId>resend-java</artifactId>
+			<version>4.13.0</version>
+		</dependency>
 	</dependencies>
 
 	<build>

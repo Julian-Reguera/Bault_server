@@ -13,6 +13,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.exceptions.DeviceRemovedException;
+import baultServer.model.BillingPlan;
 import baultServer.model.Device;
 import baultServer.model.User;
 import baultServer.repositorys.DevicePresenceRepository;
@@ -23,13 +25,18 @@ public class DeviceService {
 
     private static final SecureRandom RNG = new SecureRandom();
     private static final int RAW_SECRET_BYTES = 32;
+    private static final long DEACTIVATE_LOCK_DAYS = 7L;
 
     private final DeviceRepository repository;
     private final DevicePresenceRepository presenceRepository;
+    private final RefreshTokenService refreshTokenService;
 
-    public DeviceService(DeviceRepository repository, DevicePresenceRepository presenceRepository) {
+    public DeviceService(DeviceRepository repository,
+                         DevicePresenceRepository presenceRepository,
+                         RefreshTokenService refreshTokenService) {
         this.repository = repository;
         this.presenceRepository = presenceRepository;
+        this.refreshTokenService = refreshTokenService;
     }
 
     public List<Device> findByUser(User user) {
@@ -51,6 +58,10 @@ public class DeviceService {
                 .toList();
     }
 
+    public long countActive(User user) {
+        return repository.countByUserAndStatus(user, Device.Status.ACTIVE);
+    }
+
     @Transactional
     public Registered register(User user, String alias, String operatingSystem, String appVersion) {
         String raw = generateRawSecret();
@@ -60,29 +71,128 @@ public class DeviceService {
         device.setOperatingSystem(operatingSystem);
         device.setAppVersion(appVersion);
         device.setSecretHash(hash(raw));
-        device.setEnabled(true);
-        device.setTrusted(false);
         device.setCreatedAt(ZonedDateTime.now());
         device.setLastConnection(ZonedDateTime.now());
+        device.setStatus(canAllocateActive(user) ? Device.Status.ACTIVE : Device.Status.DISABLED);
         repository.save(device);
         return new Registered(device, raw);
     }
 
     /**
      * Valida que el device pertenece al usuario y que el secreto presentado cuadra.
-     * Lanza 401 si algo no cuadra.
+     * BLOCKED -> 403 (no reemite tokens ni cae a register).
+     * REMOVED -> lanza DeviceRemovedException para que el caller registre uno nuevo.
      */
     public Device verify(User user, Long deviceId, String rawSecret) {
         Device device = repository.findByIdAndUser(deviceId, user)
                 .orElseThrow(() -> unauthorized("Unknown device"));
-        if (!device.isEnabled()) {
-            throw unauthorized("Device disabled");
-        }
         if (!constantTimeEquals(device.getSecretHash(), hash(rawSecret))) {
             throw unauthorized("Invalid device secret");
         }
-
+        switch (device.getStatus()) {
+            case BLOCKED -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Device blocked");
+            case REMOVED -> throw new DeviceRemovedException();
+            case ACTIVE, DISABLED -> { /* OK */ }
+        }
         return device;
+    }
+
+    @Transactional
+    public Device activate(Device device) {
+        if (device.getStatus() == Device.Status.BLOCKED || device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cannot activate device in status " + device.getStatus());
+        }
+        if (device.getStatus() == Device.Status.ACTIVE) {
+            return device;
+        }
+        if (!canAllocateActive(device.getUser())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Plan device limit reached");
+        }
+        device.setStatus(Device.Status.ACTIVE);
+        device.setLastActivatedAt(ZonedDateTime.now());
+        return repository.save(device);
+    }
+
+    @Transactional
+    public Device deactivate(Device device) {
+        if (device.getStatus() == Device.Status.BLOCKED || device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Cannot deactivate device in status " + device.getStatus());
+        }
+        if (device.getStatus() == Device.Status.DISABLED) {
+            return device;
+        }
+        ZonedDateTime lastActivated = device.getLastActivatedAt();
+        if (lastActivated != null
+                && lastActivated.plusDays(DEACTIVATE_LOCK_DAYS).isAfter(ZonedDateTime.now())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Device cannot be deactivated within " + DEACTIVATE_LOCK_DAYS + " days of activation");
+        }
+        device.setStatus(Device.Status.DISABLED);
+        return repository.save(device);
+    }
+
+    @Transactional
+    public Device block(Device device) {
+        if (device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Cannot block a removed device");
+        }
+        if (device.getStatus() == Device.Status.BLOCKED) {
+            return device;
+        }
+        device.setStatus(Device.Status.BLOCKED);
+        Device saved = repository.save(device);
+        refreshTokenService.revokeAllByDevice(saved);
+        return saved;
+    }
+
+    @Transactional
+    public Device unblock(Device device) {
+        if (device.getStatus() != Device.Status.BLOCKED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Only blocked devices can be unblocked (was " + device.getStatus() + ")");
+        }
+        device.setStatus(Device.Status.DISABLED);
+        return repository.save(device);
+    }
+
+    @Transactional
+    public Device remove(Device device) {
+        if (device.getStatus() == Device.Status.REMOVED) {
+            return device;
+        }
+        device.setStatus(Device.Status.REMOVED);
+        Device saved = repository.save(device);
+        refreshTokenService.revokeAllByDevice(saved);
+        return saved;
+    }
+
+    @Transactional
+    public Device rename(Device device, String alias) {
+        device.setAlias(alias);
+        return repository.save(device);
+    }
+
+    /**
+     * Refresca lastConnection y actualiza operatingSystem/appVersion si vienen no nulos.
+     * Usado por login (rama verify) y refresh para mantener la metadata del device al día.
+     */
+    @Transactional
+    public Device touchDeviceInfo(Device device, String operatingSystem, String appVersion) {
+        if (operatingSystem != null) device.setOperatingSystem(operatingSystem);
+        if (appVersion != null) device.setAppVersion(appVersion);
+        device.setLastConnection(ZonedDateTime.now());
+        return repository.save(device);
+    }
+
+    private boolean canAllocateActive(User user) {
+        BillingPlan plan = user.getBillingPlan();
+        if (plan == null) return false;
+        int max = plan.getMaxDevices();
+        if (max <= 0) return true;
+        return countActive(user) < max;
     }
 
     private String generateRawSecret() {

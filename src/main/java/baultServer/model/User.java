@@ -43,6 +43,7 @@ public class User {
 
     private String roles;
     private boolean enabled;
+    private boolean emailVerified;
 
     public boolean hasRole(Role role) {
         String roleName = role.name();
@@ -52,6 +53,11 @@ public class User {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "billing_plan_id")
     private BillingPlan billingPlan;
+
+    //Atributos "de la relacion" user<->plan: fecha alta del plan actual y ultimo pago.
+    //Nulables porque un user puede existir sin plan (o sin haber pagado aun).
+    private ZonedDateTime planSubscribedAt;
+    private ZonedDateTime planLastPaymentAt;
 
     @OneToMany(mappedBy = "user")
     private List<Device> linkedDevices;

@@ -25,7 +25,7 @@ import lombok.Data;
 })
 public class Transfer {
     public enum Status {
-        PENDING, IN_PROGRESS, COMPLETED, FAILED, DENIED
+        PENDING, IN_PROGRESS, COMPLETED, FAILED, DENIED, CANCELLED
     }
 
     @Id
@@ -41,6 +41,7 @@ public class Transfer {
     private Long sizeBytes;
     private ZonedDateTime createdAt;
     private ZonedDateTime startedAt;
+    private ZonedDateTime completedAt;
 
     @Column(length = 500)
     private String failureReason;
