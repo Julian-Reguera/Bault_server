@@ -70,12 +70,10 @@ public class FolderController {
                                                  @AuthenticationPrincipal UserDetails principal) {
         User user = currentUser(principal);
         Device device = deviceService.findByIdAndUser(deviceId, user);
-        if (device.getStatus() != Device.Status.ACTIVE) {
-            throw new ResponseStatusException(FORBIDDEN, "Device not active");
-        }
-
         Map<String, Object> resultado = new HashMap<>();
+        
         resultado.put("folders", folderService.findSharedByDevice(device));
+        resultado.put("folder-status", device.getStatus().toString());
         return resultado;
     }
 
@@ -111,6 +109,11 @@ public class FolderController {
                                              HttpServletRequest request) {
         User user = currentUser(principal);
         Folder folder = loadFolderOwnedByCaller(folderId, user, request);
+
+        if(!folder.isEnabled()) {
+            throw new ResponseStatusException(FORBIDDEN, "Folder is disabled");
+        }
+
         folderService.unshare(folder);
         return ResponseEntity.noContent().build();
     }
@@ -122,6 +125,10 @@ public class FolderController {
                                                HttpServletRequest request) {
         User user = currentUser(principal);
         Folder folder = loadFolderOwnedByCaller(folderId, user, request);
+
+        if(!folder.isEnabled()) {
+            throw new ResponseStatusException(FORBIDDEN, "Folder is disabled");
+        }
 
         JsonNode sharingNode = body == null ? null : body.get("sharing");
         if (sharingNode == null || sharingNode.isNull()) {
@@ -143,6 +150,10 @@ public class FolderController {
         Folder folder = folderRepository.findById(folderId)
                 .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Folder not found"));
 
+        if(!folder.isEnabled()) {
+            throw new ResponseStatusException(FORBIDDEN, "Folder is disabled");
+        }
+        
         Device ownerDevice = folder.getDevice();
         if (!ownerDevice.getUser().getId().equals(user.getId())) {
             throw new ResponseStatusException(FORBIDDEN, "Folder does not belong to user");

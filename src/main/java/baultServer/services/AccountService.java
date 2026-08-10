@@ -1,18 +1,15 @@
 package baultServer.services;
 
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.List;
 
 import org.springframework.stereotype.Service;
 
 import baultServer.model.BillingPlan;
 import baultServer.model.Device;
 import baultServer.model.User;
-import baultServer.repositorys.BillingPlanRepository;
 import baultServer.repositorys.DeviceRepository;
 import baultServer.repositorys.TransferRepository;
+import baultServer.services.PlanService.PlanDto;
 
 @Service
 public class AccountService {
@@ -21,14 +18,11 @@ public class AccountService {
 
     private final DeviceRepository deviceRepository;
     private final TransferRepository transferRepository;
-    private final BillingPlanRepository planRepository;
 
     public AccountService(DeviceRepository deviceRepository,
-                          TransferRepository transferRepository,
-                          BillingPlanRepository planRepository) {
+                          TransferRepository transferRepository) {
         this.deviceRepository = deviceRepository;
         this.transferRepository = transferRepository;
-        this.planRepository = planRepository;
     }
 
     public AccountDto getAccount(User user) {
@@ -39,21 +33,6 @@ public class AccountService {
         ZonedDateTime nextRenewalAt = computeRenewalDate(user);
         return new AccountDto(userDto, planDto, usage,
                 user.getPlanSubscribedAt(), user.getPlanLastPaymentAt(), nextRenewalAt);
-    }
-
-    public List<PlanDto> listPlans(User user) {
-        BillingPlan current = user.getBillingPlan();
-        Long currentId = current == null ? null : current.getId();
-
-        List<BillingPlan> plans = new ArrayList<>(planRepository.findByEnabledTrueOrderByMonthlyPriceAsc());
-        //Aunque el plan del user este disabled, tiene que aparecer en el catalogo (marcado como current).
-        if (current != null && !current.isEnabled()) {
-            plans.add(current);
-        }
-        plans.sort(Comparator.comparingInt(BillingPlan::getMonthlyPrice));
-        return plans.stream()
-                .map(p -> PlanDto.of(p, currentId != null && currentId.equals(p.getId())))
-                .toList();
     }
 
     private UsageDto computeUsage(User user) {
@@ -82,32 +61,6 @@ public class AccountService {
             if (first != null && !first.isBlank()) sb.append(Character.toUpperCase(first.charAt(0)));
             if (last != null && !last.isBlank()) sb.append(Character.toUpperCase(last.charAt(0)));
             return sb.length() == 0 ? "" : sb.toString();
-        }
-    }
-
-    public record PlanDto(
-            Long id,
-            String name,
-            int monthlyPriceCents,
-            int annualPriceCents,
-            int maxSpeedMbps,
-            int maxTrafficMb,
-            int maxDevices,
-            int maxConcurrentTransfers,
-            boolean encryptedFoldersIncluded,
-            boolean isCurrent) {
-        public static PlanDto of(BillingPlan p, boolean isCurrent) {
-            return new PlanDto(
-                    p.getId(),
-                    p.getName(),
-                    p.getMonthlyPrice(),
-                    p.getAnnualPrice(),
-                    p.getMaxSpeed(),
-                    p.getMaxTraffic(),
-                    p.getMaxDevices(),
-                    p.getMaxConcurrentTransfers(),
-                    p.isEncryptedFoldersIncluded(),
-                    isCurrent);
         }
     }
 

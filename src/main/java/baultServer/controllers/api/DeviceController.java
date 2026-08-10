@@ -19,7 +19,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
-import baultServer.model.BillingPlan;
 import baultServer.model.Device;
 import baultServer.model.User;
 import baultServer.repositorys.DevicePresenceRepository;
@@ -49,11 +48,8 @@ public class DeviceController {
     @ResponseBody
     public Map<String, Object> list(@AuthenticationPrincipal UserDetails principal) {
         User user = currentUser(principal);
-        BillingPlan plan = user.getBillingPlan();
         Map<String, Object> result = new HashMap<>();
         result.put("devices", deviceService.findByUserWithPresence(user));
-        result.put("activeCount", deviceService.countActive(user));
-        result.put("maxDevices", plan == null ? 0 : plan.getMaxDevices());
         return result;
     }
 
@@ -64,6 +60,11 @@ public class DeviceController {
         User user = currentUser(principal);
         Device device = deviceService.findByIdAndUser(deviceId, user);
         Device.Transfer dto = device.toTransfer();
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         dto.setOnline(presenceRepository.isOnline(device.getId()));
         return dto;
     }
@@ -76,9 +77,15 @@ public class DeviceController {
         User user = currentUser(principal);
         Device device = deviceService.findByIdAndUser(deviceId, user);
         JsonNode aliasNode = body == null ? null : body.get("alias");
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         if (aliasNode == null || aliasNode.isNull() || !aliasNode.isTextual()) {
             throw new ResponseStatusException(BAD_REQUEST, "Missing or invalid field: alias");
         }
+
         Device updated = deviceService.rename(device, aliasNode.asText());
         Device.Transfer dto = updated.toTransfer();
         dto.setOnline(presenceRepository.isOnline(updated.getId()));
@@ -93,6 +100,11 @@ public class DeviceController {
         Device device = deviceService.findByIdAndUser(deviceId, user);
         Device updated = deviceService.activate(device);
         Device.Transfer dto = updated.toTransfer();
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         dto.setOnline(presenceRepository.isOnline(updated.getId()));
         return dto;
     }
@@ -105,6 +117,11 @@ public class DeviceController {
         Device device = deviceService.findByIdAndUser(deviceId, user);
         Device updated = deviceService.deactivate(device);
         Device.Transfer dto = updated.toTransfer();
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         dto.setOnline(presenceRepository.isOnline(updated.getId()));
         return dto;
     }
@@ -117,6 +134,11 @@ public class DeviceController {
         Device device = deviceService.findByIdAndUser(deviceId, user);
         Device updated = deviceService.block(device);
         Device.Transfer dto = updated.toTransfer();
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         dto.setOnline(presenceRepository.isOnline(updated.getId()));
         return dto;
     }
@@ -129,6 +151,11 @@ public class DeviceController {
         Device device = deviceService.findByIdAndUser(deviceId, user);
         Device updated = deviceService.unblock(device);
         Device.Transfer dto = updated.toTransfer();
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         dto.setOnline(presenceRepository.isOnline(updated.getId()));
         return dto;
     }
@@ -138,6 +165,11 @@ public class DeviceController {
                                        @AuthenticationPrincipal UserDetails principal) {
         User user = currentUser(principal);
         Device device = deviceService.findByIdAndUser(deviceId, user);
+
+        if(device.getStatus() == Device.Status.REMOVED) {
+            throw new ResponseStatusException(NOT_FOUND, "Device not found");
+        }
+
         deviceService.remove(device);
         return ResponseEntity.noContent().build();
     }

@@ -13,7 +13,8 @@ import baultServer.model.User;
 import baultServer.repositorys.UserRepository;
 import baultServer.services.AccountService;
 import baultServer.services.AccountService.AccountDto;
-import baultServer.services.AccountService.PlanDto;
+import baultServer.services.PlanService;
+import baultServer.services.PlanService.PlanDto;
 
 import static org.springframework.http.HttpStatus.NOT_FOUND;
 
@@ -23,10 +24,12 @@ public class ApiController {
 
     private final UserRepository userRepository;
     private final AccountService accountService;
+    private final PlanService planService;
 
-    public ApiController(UserRepository userRepository, AccountService accountService) {
+    public ApiController(UserRepository userRepository, AccountService accountService, PlanService planService) {
         this.userRepository = userRepository;
         this.accountService = accountService;
+        this.planService = planService;
     }
 
     /** Toda la info que necesita la pantalla Cuenta: user + plan actual + usage + fechas. */
@@ -38,7 +41,7 @@ public class ApiController {
     /** Catalogo de planes disponibles (enabled=true). Marca isCurrent en el del user. */
     @GetMapping(path = "/plans", produces = "application/json")
     public List<PlanDto> plans(@AuthenticationPrincipal UserDetails principal) {
-        return accountService.listPlans(currentUser(principal));
+        return planService.listPlans(currentUser(principal));
     }
 
     private User currentUser(UserDetails principal) {
