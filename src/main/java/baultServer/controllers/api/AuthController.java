@@ -24,7 +24,13 @@ import baultServer.model.Device;
 import baultServer.model.EmailCode;
 import baultServer.model.User;
 import baultServer.repositorys.UserRepository;
+import baultServer.exceptions.DeviceAuthenticationException;
+import baultServer.exceptions.DeviceBlockedException;
 import baultServer.exceptions.DeviceRemovedException;
+import baultServer.exceptions.EmailCodeCooldownException;
+import baultServer.exceptions.EmailCodeExpiredException;
+import baultServer.exceptions.EmailCodeInvalidException;
+import baultServer.exceptions.EmailCodeNotFoundException;
 import baultServer.exceptions.EmailDeliveryException;
 import baultServer.services.DeviceService;
 import baultServer.services.DeviceService.Registered;
@@ -36,7 +42,10 @@ import baultServer.services.RefreshTokenService.Rotated;
 import static org.springframework.http.HttpStatus.BAD_REQUEST;
 import static org.springframework.http.HttpStatus.CONFLICT;
 import static org.springframework.http.HttpStatus.FORBIDDEN;
+import static org.springframework.http.HttpStatus.GONE;
 import static org.springframework.http.HttpStatus.NOT_FOUND;
+import static org.springframework.http.HttpStatus.TOO_MANY_REQUESTS;
+import static org.springframework.http.HttpStatus.UNAUTHORIZED;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -75,8 +84,10 @@ public class AuthController {
         String password = requireText(body, "password");
         Long deviceId = optionalLong(body, "deviceId");
         String deviceSecret = optionalText(body, "deviceSecret");
+        String operatingSystem = optionalText(body, "operatingSystem");
+        String appVersion = optionalText(body, "appVersion");
 
-        //Autentifica con Spring Security (si fallan las credenciales lanza excepción -> 401)
+        //Autentifica con Spring Security (si fallan las credenciales lanza excepción -> 401) (verifica que el usuario está enabled)
         Authentication authResult = authManager.authenticate(
                 new UsernamePasswordAuthenticationToken(email, password));
         UserDetails principal = (UserDetails) authResult.getPrincipal();
@@ -95,8 +106,6 @@ public class AuthController {
         //Verificación de dispositivo
         Device device = null;
         String rawSecretToReturn = null;
-        String operatingSystem = optionalText(body, "operatingSystem");
-        String appVersion = optionalText(body, "appVersion");
         if (deviceId != null && deviceSecret != null) {
             try {
                 device = deviceService.verify(user, deviceId, deviceSecret);
@@ -104,6 +113,10 @@ public class AuthController {
             } catch (DeviceRemovedException e) {
                 // El device viejo fue eliminado -> creamos uno nuevo transparentemente
                 device = null;
+            } catch (DeviceBlockedException e) {
+                throw new ResponseStatusException(FORBIDDEN, e.getMessage());
+            } catch (DeviceAuthenticationException e) {
+                throw new ResponseStatusException(UNAUTHORIZED, e.getMessage());
             }
         }
         if (device == null) {
@@ -149,6 +162,8 @@ public class AuthController {
             emailCodeService.issueAndSend(u, EmailCode.Purpose.EMAIL_VERIFICATION);
         } catch (EmailDeliveryException ignored) {
             //Log ya emitido por el service; el cliente puede reintentar con /public/email/verify/request.
+        } catch (EmailCodeCooldownException e) {
+            throw new ResponseStatusException(TOO_MANY_REQUESTS, e.getMessage());
         }
 
         ObjectNode resp = JsonNodeFactory.instance.objectNode();
@@ -167,6 +182,8 @@ public class AuthController {
                     emailCodeService.issueAndSend(user, EmailCode.Purpose.EMAIL_VERIFICATION);
                 } catch (EmailDeliveryException ignored) {
                     //Silencioso a propósito: mismo comportamiento visible que si el email no existe.
+                } catch (EmailCodeCooldownException e) {
+                    throw new ResponseStatusException(TOO_MANY_REQUESTS, e.getMessage());
                 }
             }
         });
@@ -182,7 +199,13 @@ public class AuthController {
         if (user.isEmailVerified()) {
             return ResponseEntity.noContent().build();
         }
-        emailCodeService.verifyAndConsume(user, EmailCode.Purpose.EMAIL_VERIFICATION, code);
+        try {
+            emailCodeService.verifyAndConsume(user, EmailCode.Purpose.EMAIL_VERIFICATION, code);
+        } catch (EmailCodeNotFoundException | EmailCodeInvalidException e) {
+            throw new ResponseStatusException(BAD_REQUEST, e.getMessage());
+        } catch (EmailCodeExpiredException e) {
+            throw new ResponseStatusException(GONE, e.getMessage());
+        }
         user.setEmailVerified(true);
         userRepository.save(user);
         return ResponseEntity.noContent().build();
@@ -197,6 +220,8 @@ public class AuthController {
                 emailCodeService.issueAndSend(user, EmailCode.Purpose.PASSWORD_RESET);
             } catch (EmailDeliveryException ignored) {
                 //Silencioso a propósito: mismo comportamiento visible que si el email no existe.
+            } catch (EmailCodeCooldownException e) {
+                throw new ResponseStatusException(TOO_MANY_REQUESTS, e.getMessage());
             }
         });
         return ResponseEntity.accepted().build();
@@ -209,7 +234,13 @@ public class AuthController {
         String newPassword = requireText(body, "newPassword");
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ResponseStatusException(BAD_REQUEST, "Invalid code"));
-        emailCodeService.verifyAndConsume(user, EmailCode.Purpose.PASSWORD_RESET, code);
+        try {
+            emailCodeService.verifyAndConsume(user, EmailCode.Purpose.PASSWORD_RESET, code);
+        } catch (EmailCodeNotFoundException | EmailCodeInvalidException e) {
+            throw new ResponseStatusException(BAD_REQUEST, e.getMessage());
+        } catch (EmailCodeExpiredException e) {
+            throw new ResponseStatusException(GONE, e.getMessage());
+        }
         user.setPasswordHash(passwordEncoder.encode(newPassword));
         userRepository.save(user);
         //Invalida todas las sesiones tras cambio de contraseña.

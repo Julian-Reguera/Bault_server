@@ -10,11 +10,13 @@ import java.util.Base64;
 import java.util.Optional;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.exceptions.EmailCodeCooldownException;
+import baultServer.exceptions.EmailCodeExpiredException;
+import baultServer.exceptions.EmailCodeInvalidException;
+import baultServer.exceptions.EmailCodeNotFoundException;
 import baultServer.model.EmailCode;
 import baultServer.model.User;
 import baultServer.repositorys.EmailCodeRepository;
@@ -65,13 +67,12 @@ public class EmailCodeService {
     public void issueAndSend(User user, EmailCode.Purpose purpose) {
         ZonedDateTime now = ZonedDateTime.now();
 
-        Optional<EmailCode> latest = repository.findTopByUserAndPurposeOrderByCreatedAtDesc(user, purpose);
+        Optional<EmailCode> latest = repository.findLatest(user, purpose);
         latest.ifPresent(prev -> {
             Duration since = Duration.between(prev.getCreatedAt(), now);
             long remaining = cooldownSeconds - since.getSeconds();
             if (remaining > 0) {
-                throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
-                        "Wait " + remaining + "s before requesting another code");
+                throw new EmailCodeCooldownException(remaining);
             }
         });
 
@@ -100,14 +101,14 @@ public class EmailCodeService {
      */
     @Transactional
     public void verifyAndConsume(User user, EmailCode.Purpose purpose, String rawCode) {
-        EmailCode code = repository.findTopByUserAndPurposeAndConsumedAtIsNullOrderByCreatedAtDesc(user, purpose)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "No active code"));
+        EmailCode code = repository.findLatestActive(user, purpose)
+                .orElseThrow(EmailCodeNotFoundException::new);
 
         ZonedDateTime now = ZonedDateTime.now();
         if (code.getExpiresAt().isBefore(now)) {
             code.setConsumedAt(now);
             repository.save(code);
-            throw new ResponseStatusException(HttpStatus.GONE, "Code expired");
+            throw new EmailCodeExpiredException();
         }
 
         if (!constantTimeEquals(code.getCodeHash(), hash(rawCode))) {
@@ -116,7 +117,7 @@ public class EmailCodeService {
                 code.setConsumedAt(now);
             }
             repository.save(code);
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid code");
+            throw new EmailCodeInvalidException();
         }
 
         code.setConsumedAt(now);

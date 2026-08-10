@@ -13,6 +13,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.exceptions.DeviceAuthenticationException;
+import baultServer.exceptions.DeviceBlockedException;
 import baultServer.exceptions.DeviceRemovedException;
 import baultServer.model.BillingPlan;
 import baultServer.model.Device;
@@ -85,12 +87,12 @@ public class DeviceService {
      */
     public Device verify(User user, Long deviceId, String rawSecret) {
         Device device = repository.findByIdAndUser(deviceId, user)
-                .orElseThrow(() -> unauthorized("Unknown device"));
+                .orElseThrow(() -> new DeviceAuthenticationException("Unknown device"));
         if (!constantTimeEquals(device.getSecretHash(), hash(rawSecret))) {
-            throw unauthorized("Invalid device secret");
+            throw new DeviceAuthenticationException("Invalid device secret");
         }
         switch (device.getStatus()) {
-            case BLOCKED -> throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Device blocked");
+            case BLOCKED -> throw new DeviceBlockedException();
             case REMOVED -> throw new DeviceRemovedException();
             case ACTIVE, DISABLED -> { /* OK */ }
         }
@@ -220,10 +222,6 @@ public class DeviceService {
             r |= a.charAt(i) ^ b.charAt(i);
         }
         return r == 0;
-    }
-
-    private static ResponseStatusException unauthorized(String msg) {
-        return new ResponseStatusException(HttpStatus.UNAUTHORIZED, msg);
     }
 
     public record Registered(Device device, String rawSecret) {}
