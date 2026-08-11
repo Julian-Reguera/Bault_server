@@ -8,7 +8,7 @@ import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.stereotype.Controller;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 import baultServer.configs.ws.JwtHandshakeInterceptor;
 import baultServer.exceptions.DeviceDeniedException;

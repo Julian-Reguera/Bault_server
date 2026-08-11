@@ -5,7 +5,7 @@ import java.util.concurrent.CompletableFuture;
 
 import org.springframework.stereotype.Service;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 import baultServer.repositorys.PendingRequestRepository;
 import baultServer.repositorys.PendingRequestRepository.Pending;

@@ -6,7 +6,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.stereotype.Repository;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 /**
  * Almacén in-memory de peticiones RPC pendientes indexadas por correlationId.

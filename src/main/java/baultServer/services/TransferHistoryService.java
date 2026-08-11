@@ -20,9 +20,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import baultServer.model.Device;
 import baultServer.model.Folder;
@@ -41,13 +41,16 @@ public class TransferHistoryService {
     private final TransferRepository transferRepository;
     private final FolderRepository folderRepository;
     private final ObjectMapper objectMapper;
+    private final EventWsBroadcaster eventBroadcaster;
 
     public TransferHistoryService(TransferRepository transferRepository,
                                   FolderRepository folderRepository,
-                                  ObjectMapper objectMapper) {
+                                  ObjectMapper objectMapper,
+                                  EventWsBroadcaster eventBroadcaster) {
         this.transferRepository = transferRepository;
         this.folderRepository = folderRepository;
         this.objectMapper = objectMapper;
+        this.eventBroadcaster = eventBroadcaster;
     }
 
     // ---------------- Listado paginado ----------------
@@ -164,7 +167,9 @@ public class TransferHistoryService {
         } else {
             copy.setDestinationFolder(freshFolder);
         }
-        return transferRepository.save(copy);
+        Transfer saved = transferRepository.save(copy);
+        eventBroadcaster.transferCreated(user.getId(), saved.getId(), saved.getStatus());
+        return saved;
     }
 
     // ---------------- CSV streaming ----------------
@@ -293,7 +298,7 @@ public class TransferHistoryService {
                     new CursorPayload(createdAt.format(DateTimeFormatter.ISO_OFFSET_DATE_TIME), id));
             return Base64.getUrlEncoder().withoutPadding()
                     .encodeToString(json.getBytes(StandardCharsets.UTF_8));
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new IllegalStateException("Cannot encode cursor", e);
         }
     }

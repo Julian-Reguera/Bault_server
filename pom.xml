@@ -109,6 +109,14 @@
 			<artifactId>spring-boot-starter-websocket-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Awaitility: espera condicional (polling con timeout) para tests asíncronos —
+		     handshakes STOMP, propagación de presencia WS, RPCs con futures. -->
+		<dependency>
+			<groupId>org.awaitility</groupId>
+			<artifactId>awaitility</artifactId>
+			<version>4.2.2</version>
+			<scope>test</scope>
+		</dependency>
 
 		<dependency>
 			<groupId>org.projectlombok</groupId>
@@ -116,10 +124,10 @@
 			<optional>true</optional>
 		</dependency>
 
-		<dependency>
-			<groupId>com.fasterxml.jackson.core</groupId>
-			<artifactId>jackson-databind</artifactId>
-		</dependency>
+		<!-- Jackson 3 lo trae spring-boot-starter-jackson (transitivo de spring-boot-starter-webmvc).
+		     No declaramos jackson-databind 2 explícitamente porque provocaba conflicto:
+		     ambos com.fasterxml.jackson (v2) y tools.jackson (v3) en el classpath, y el
+		     HttpMessageConverter de Boot 4 no podía deserializar los JsonNode v2. -->
 
 		<dependency>
 			<groupId>io.jsonwebtoken</groupId>

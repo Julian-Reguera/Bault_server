@@ -32,13 +32,16 @@ public class DeviceService {
     private final DeviceRepository repository;
     private final DevicePresenceRepository presenceRepository;
     private final RefreshTokenService refreshTokenService;
+    private final EventWsBroadcaster eventBroadcaster;
 
     public DeviceService(DeviceRepository repository,
                          DevicePresenceRepository presenceRepository,
-                         RefreshTokenService refreshTokenService) {
+                         RefreshTokenService refreshTokenService,
+                         EventWsBroadcaster eventBroadcaster) {
         this.repository = repository;
         this.presenceRepository = presenceRepository;
         this.refreshTokenService = refreshTokenService;
+        this.eventBroadcaster = eventBroadcaster;
     }
 
     public List<Device> findByUser(User user) {
@@ -77,6 +80,7 @@ public class DeviceService {
         device.setLastConnection(ZonedDateTime.now());
         device.setStatus(canAllocateActive(user) ? Device.Status.ACTIVE : Device.Status.DISABLED);
         repository.save(device);
+        eventBroadcaster.deviceCreated(user.getId(), device);
         return new Registered(device, raw);
     }
 
@@ -114,7 +118,9 @@ public class DeviceService {
         }
         device.setStatus(Device.Status.ACTIVE);
         device.setLastActivatedAt(ZonedDateTime.now());
-        return repository.save(device);
+        Device saved = repository.save(device);
+        eventBroadcaster.deviceUpdated(saved.getUser().getId(), saved);
+        return saved;
     }
 
     @Transactional
@@ -133,7 +139,9 @@ public class DeviceService {
                     "Device cannot be deactivated within " + DEACTIVATE_LOCK_DAYS + " days of activation");
         }
         device.setStatus(Device.Status.DISABLED);
-        return repository.save(device);
+        Device saved = repository.save(device);
+        eventBroadcaster.deviceUpdated(saved.getUser().getId(), saved);
+        return saved;
     }
 
     @Transactional
@@ -147,6 +155,7 @@ public class DeviceService {
         device.setStatus(Device.Status.BLOCKED);
         Device saved = repository.save(device);
         refreshTokenService.revokeAllByDevice(saved);
+        eventBroadcaster.deviceUpdated(saved.getUser().getId(), saved);
         return saved;
     }
 
@@ -157,7 +166,9 @@ public class DeviceService {
                     "Only blocked devices can be unblocked (was " + device.getStatus() + ")");
         }
         device.setStatus(Device.Status.DISABLED);
-        return repository.save(device);
+        Device saved = repository.save(device);
+        eventBroadcaster.deviceUpdated(saved.getUser().getId(), saved);
+        return saved;
     }
 
     @Transactional
@@ -168,13 +179,16 @@ public class DeviceService {
         device.setStatus(Device.Status.REMOVED);
         Device saved = repository.save(device);
         refreshTokenService.revokeAllByDevice(saved);
+        eventBroadcaster.deviceRemoved(saved.getUser().getId(), saved.getId());
         return saved;
     }
 
     @Transactional
     public Device rename(Device device, String alias) {
         device.setAlias(alias);
-        return repository.save(device);
+        Device saved = repository.save(device);
+        eventBroadcaster.deviceUpdated(saved.getUser().getId(), saved);
+        return saved;
     }
 
     /**

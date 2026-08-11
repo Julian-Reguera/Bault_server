@@ -2,6 +2,9 @@ package baultServer.controllers.api;
 
 import java.time.ZonedDateTime;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -16,13 +19,15 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 
+import baultServer.model.BillingPlan;
 import baultServer.model.Device;
 import baultServer.model.EmailCode;
 import baultServer.model.User;
+import baultServer.repositorys.BillingPlanRepository;
 import baultServer.repositorys.UserRepository;
 import baultServer.exceptions.DeviceAuthenticationException;
 import baultServer.exceptions.DeviceBlockedException;
@@ -51,31 +56,39 @@ import static org.springframework.http.HttpStatus.UNAUTHORIZED;
 @RequestMapping("/api/auth")
 public class AuthController {
 
+    private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+
     private final AuthenticationManager authManager;
     private final UserDetailsService userDetailsService;
     private final UserRepository userRepository;
+    private final BillingPlanRepository billingPlanRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final RefreshTokenService refreshTokenService;
     private final DeviceService deviceService;
     private final EmailCodeService emailCodeService;
+    private final String defaultPlanName;
 
     public AuthController(AuthenticationManager authManager,
                           UserDetailsService userDetailsService,
                           UserRepository userRepository,
+                          BillingPlanRepository billingPlanRepository,
                           PasswordEncoder passwordEncoder,
                           JwtService jwtService,
                           RefreshTokenService refreshTokenService,
                           DeviceService deviceService,
-                          EmailCodeService emailCodeService) {
+                          EmailCodeService emailCodeService,
+                          @Value("${bault.plan.default:FREE}") String defaultPlanName) {
         this.authManager = authManager;
         this.userDetailsService = userDetailsService;
         this.userRepository = userRepository;
+        this.billingPlanRepository = billingPlanRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.refreshTokenService = refreshTokenService;
         this.deviceService = deviceService;
         this.emailCodeService = emailCodeService;
+        this.defaultPlanName = defaultPlanName;
     }
 
     @PostMapping("/public/login/password")
@@ -154,6 +167,15 @@ public class AuthController {
         u.setEnabled(true);
         u.setEmailVerified(false);
         u.setCreatedAt(ZonedDateTime.now());
+        //Sin plan por defecto, el user no puede registrar devices ni hacer transferencias (403).
+        BillingPlan defaultPlan = billingPlanRepository.findByName(defaultPlanName).orElse(null);
+        if (defaultPlan == null) {
+            log.warn("Default billing plan '{}' not found; user {} will be created without plan",
+                    defaultPlanName, email);
+        } else {
+            u.setBillingPlan(defaultPlan);
+            u.setPlanSubscribedAt(u.getCreatedAt());
+        }
         userRepository.save(u);
 
         //No emitimos tokens ni creamos device: el login exige email verificado, así que serían inservibles.

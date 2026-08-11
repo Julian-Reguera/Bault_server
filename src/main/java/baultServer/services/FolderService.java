@@ -18,10 +18,14 @@ public class FolderService {
 
     private final FolderRepository repository;
     private final CryptoService cryptoService;
+    private final EventWsBroadcaster eventBroadcaster;
 
-    public FolderService(FolderRepository repository, CryptoService cryptoService) {
+    public FolderService(FolderRepository repository,
+                         CryptoService cryptoService,
+                         EventWsBroadcaster eventBroadcaster) {
         this.repository = repository;
         this.cryptoService = cryptoService;
+        this.eventBroadcaster = eventBroadcaster;
     }
 
     public List<Folder.Transfer> findSharedByDevice(Device device) {
@@ -46,7 +50,9 @@ public class FolderService {
     @Transactional
     public Folder updateSharing(Folder folder, Folder.Sharing sharing) {
         folder.setSharing(sharing == null ? Folder.Sharing.NONE : sharing);
-        return repository.save(folder);
+        Folder saved = repository.save(folder);
+        eventBroadcaster.folderUpdated(saved.getDevice().getUser().getId(), saved);
+        return saved;
     }
 
     /** Soft-delete: marca la folder como no compartida y deshabilitada, sin borrar la fila. */
@@ -54,7 +60,9 @@ public class FolderService {
     public Folder unshare(Folder folder) {
         folder.setEnabled(false);
         folder.setSharing(Folder.Sharing.NONE);
-        return repository.save(folder);
+        Folder saved = repository.save(folder);
+        eventBroadcaster.folderDeleted(saved.getDevice().getUser().getId(), saved.getId());
+        return saved;
     }
 
     @Transactional
@@ -78,6 +86,7 @@ public class FolderService {
                 Arrays.fill(dek, (byte) 0);
             }
         }
+        eventBroadcaster.folderCreated(device.getUser().getId(), folder);
         return folder;
     }
 }

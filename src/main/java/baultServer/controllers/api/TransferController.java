@@ -31,9 +31,9 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 
 import baultServer.configs.http.JwtAuthenticationFilter;
 import baultServer.model.BillingPlan;
@@ -49,6 +49,7 @@ import baultServer.repositorys.UserRepository;
 import baultServer.exceptions.UploaderDenialException;
 import baultServer.repositorys.TransferPipeRepository;
 import baultServer.services.CryptoService;
+import baultServer.services.EventWsBroadcaster;
 import baultServer.services.TransferHistoryService;
 import baultServer.services.TransferHistoryService.HistoryFilter;
 import baultServer.services.TransferHistoryService.HistoryPage;
@@ -88,6 +89,7 @@ public class TransferController {
     private final SimpMessagingTemplate messagingTemplate;
     private final CryptoService cryptoService;
     private final TransferHistoryService historyService;
+    private final EventWsBroadcaster eventBroadcaster;
     /** Techo global opcional (Mbps); 0 = sin techo global, se respeta solo el plan. */
     private final long serverCeilingBytesPerSecond;
 
@@ -100,6 +102,7 @@ public class TransferController {
                               SimpMessagingTemplate messagingTemplate,
                               CryptoService cryptoService,
                               TransferHistoryService historyService,
+                              EventWsBroadcaster eventBroadcaster,
                               @Value("${bault.transfer.download.max-mbps:0}") double downloadMaxMbps) {
         this.userRepository = userRepository;
         this.deviceRepository = deviceRepository;
@@ -110,6 +113,7 @@ public class TransferController {
         this.messagingTemplate = messagingTemplate;
         this.cryptoService = cryptoService;
         this.historyService = historyService;
+        this.eventBroadcaster = eventBroadcaster;
         this.serverCeilingBytesPerSecond = downloadMaxMbps <= 0 ? 0L
                 : (long) (downloadMaxMbps * BYTES_PER_MBPS);
     }
@@ -226,6 +230,7 @@ public class TransferController {
         Transfer transfer = newPendingTransfer(sender, receiver, receiver, originPath, destinationPath, idempotencyKey);
         transfer.setOriginFolder(originFolder);
         transferRepository.save(transfer);
+        eventBroadcaster.transferCreated(user.getId(), transfer.getId(), transfer.getStatus());
 
         //Notificar al sender (peer) via WS para que decida aceptar (POST /upload) o rechazar (POST /deny).
         ObjectNode data = JsonNodeFactory.instance.objectNode();
@@ -279,6 +284,7 @@ public class TransferController {
         Transfer transfer = newPendingTransfer(sender, receiver, sender, originPath, destinationPath, idempotencyKey);
         transfer.setDestinationFolder(destinationFolder);
         transferRepository.save(transfer);
+        eventBroadcaster.transferCreated(user.getId(), transfer.getId(), transfer.getStatus());
 
         //Notificar al receiver (peer) via WS para que decida aceptar (GET /download) o rechazar (POST /deny).
         ObjectNode data = JsonNodeFactory.instance.objectNode();
@@ -367,6 +373,7 @@ public class TransferController {
         transfer.setFailureReason("Cancelled by user");
         transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
+        eventBroadcaster.transferUpdated(user.getId(), transfer.getId(), transfer.getStatus());
         return ResponseEntity.noContent().build();
     }
 
@@ -407,6 +414,7 @@ public class TransferController {
         transfer.setFailureReason("Denied by peer");
         transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
+        eventBroadcaster.transferUpdated(user.getId(), transfer.getId(), transfer.getStatus());
 
         //Desbloquear al otro extremo si estaba esperando en el pipe (metadata o rendezvous).
         StreamingPipe pipe = pipeRegistry.get(transferId);
@@ -536,6 +544,7 @@ public class TransferController {
         transfer.setStatus(Transfer.Status.IN_PROGRESS);
         transfer.setStartedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
+        eventBroadcaster.transferUpdated(user.getId(), transfer.getId(), transfer.getStatus());
 
         long throttleBytesPerSecond = resolveDownloadRate(user);
 
@@ -663,6 +672,8 @@ public class TransferController {
         transfer.setStatus(Transfer.Status.COMPLETED);
         transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
+        eventBroadcaster.transferUpdated(transfer.getOwner().getUser().getId(),
+                transfer.getId(), transfer.getStatus());
     }
 
     /** Devuelve la respuesta idempotente si ya existia una transferencia con esa key para el owner. */
@@ -763,6 +774,8 @@ public class TransferController {
                 transfer.setFailureReason(trimmed);
             }
             transferRepository.save(transfer);
+            eventBroadcaster.transferUpdated(transfer.getOwner().getUser().getId(),
+                    transfer.getId(), transfer.getStatus());
         } catch (Exception ignored) {}
     }
 

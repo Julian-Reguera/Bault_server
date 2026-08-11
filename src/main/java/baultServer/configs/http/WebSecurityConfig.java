@@ -33,10 +33,10 @@ class WebSecurityConfig {
             .authorizeHttpRequests(authorize -> authorize //Permite editar el filtro authorize que determinan reglas para autorizar al usuario a acceder a diferentes rutas
                 .requestMatchers("/api/auth/public/**").permitAll() //Endpoints que emiten credenciales o funcionan con el access token expirado (login, register, refresh, reset password, logout por posesión del refresh)
                 .requestMatchers("/api/auth/secured/**").authenticated() //Endpoints de auth que requieren JWT válido (logout-all). El email verificado es implícito porque login lo exige.
-                .requestMatchers("/api/devices/**").authenticated() //Cualquier dispositivo activo o no puede acceder a devices
-                .requestMatchers("/api/devices/**").hasAuthority(JwtAuthenticationFilter.AUTH_DEVICE_ACTIVE) //Solo dispositivos activos pueden acceder a devices
-                .requestMatchers("/api/transfers/**").hasAuthority(JwtAuthenticationFilter.AUTH_DEVICE_ACTIVE)
-                .anyRequest().authenticated() //Resto de la API operativa: solo dispositivos plenamente activos.
+                .requestMatchers("/api/devices/**").authenticated() //Cualquier dispositivo (ACTIVE o DISABLED) puede consultar/gestionar sus devices
+                .requestMatchers("/api/transfers/**").hasAuthority(JwtAuthenticationFilter.AUTH_DEVICE_ACTIVE) //Solo dispositivos ACTIVE pueden operar transfers
+                .requestMatchers("/api/folders/**").hasAuthority(JwtAuthenticationFilter.AUTH_DEVICE_ACTIVE) //Solo dispositivos ACTIVE pueden ver/manipular folders
+                .anyRequest().authenticated() //Resto de la API: basta con estar autenticado.
             )
             .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
 
