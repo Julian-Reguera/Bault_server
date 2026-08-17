@@ -3,15 +3,15 @@ package baultServer.services;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.web.server.ResponseStatusException;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
 import baultServer.exceptions.DeviceDeniedException;
 import baultServer.model.Device;
 import baultServer.repositorys.DevicePresenceRepository;
@@ -36,7 +36,7 @@ public class DeviceRpcService {
 
     public JsonNode listFolderEntries(Device targetDevice, Long folderId, String subPath) {
         if (!presenceRepository.isOnline(targetDevice.getId())) {
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Owner device is offline");
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, java.util.Map.of("role", "owner"));
         }
 
         Registration registration = pendingRequests.register(targetDevice.getId());
@@ -54,19 +54,19 @@ public class DeviceRpcService {
             return registration.future().get(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             pendingRequests.cancel(correlationId);
-            throw new ResponseStatusException(HttpStatus.GATEWAY_TIMEOUT, "Owner device did not respond");
+            throw new ApiException(ApiErrorCode.DEVICE_RPC_TIMEOUT);
         } catch (InterruptedException e) {
             pendingRequests.cancel(correlationId);
             Thread.currentThread().interrupt();
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Interrupted");
+            throw new ApiException(ApiErrorCode.DEVICE_RPC_INTERRUPTED);
         } catch (java.util.concurrent.ExecutionException e) {
             pendingRequests.cancel(correlationId);
             Throwable cause = e.getCause();
             if (cause instanceof DeviceDeniedException denied) {
-                throw new ResponseStatusException(HttpStatus.FORBIDDEN, denied.getMessage());
+                throw new ApiException(ApiErrorCode.DEVICE_RPC_DENIED, denied.getMessage());
             }
-            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,
-                    cause == null ? "Owner device replied with error" : cause.getMessage());
+            throw new ApiException(ApiErrorCode.DEVICE_RPC_ERROR,
+                    cause == null ? ApiErrorCode.DEVICE_RPC_ERROR.defaultMessage() : cause.getMessage());
         }
     }
 }

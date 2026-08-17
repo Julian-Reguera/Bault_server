@@ -15,15 +15,15 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
 import baultServer.model.Device;
 import baultServer.model.Folder;
 import baultServer.model.Transfer;
@@ -104,53 +104,52 @@ public class TransferHistoryService {
     @Transactional
     public Transfer retry(Long transferId, User user, Device callerDevice) {
         Transfer original = transferRepository.findById(transferId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Transfer not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
 
         if (!original.getOwner().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Transfer does not belong to user");
+            throw new ApiException(ApiErrorCode.TRANSFER_NOT_OWNED_BY_USER);
         }
         if (!original.getOwner().getId().equals(callerDevice.getId())) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
-                    "Only the original owner device may retry (owner=" + original.getOwner().getId() + ")");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_ONLY_ORIGINAL_OWNER,
+                    java.util.Map.of("originalOwnerId", original.getOwner().getId()));
         }
 
         Set<Transfer.Status> retryable = EnumSet.of(
                 Transfer.Status.FAILED, Transfer.Status.DENIED, Transfer.Status.CANCELLED);
         if (!retryable.contains(original.getStatus())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Cannot retry transfer in status " + original.getStatus());
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_NOT_ALLOWED,
+                    java.util.Map.of("status", original.getStatus().name()));
         }
 
         Device sender = original.getSender();
         Device receiver = original.getReceiver();
         if (sender == null || receiver == null) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Original transfer missing sender or receiver");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_MISSING_PEERS);
         }
-        requireActive(sender, "Sender");
-        requireActive(receiver, "Receiver");
+        requireActive(sender, "sender");
+        requireActive(receiver, "receiver");
 
         boolean callerIsReceiver = original.getOwner().getId().equals(receiver.getId());
         Folder folderToCheck = callerIsReceiver ? original.getOriginFolder() : original.getDestinationFolder();
         Folder.Sharing requiredSharing = callerIsReceiver ? Folder.Sharing.READ : Folder.Sharing.READ_WRITE;
         if (folderToCheck == null) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Original transfer has no folder to re-validate");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_MISSING_FOLDER);
         }
         Folder freshFolder = folderRepository.findById(folderToCheck.getId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT,
-                        "Folder no longer exists"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_RETRY_FOLDER_GONE));
         if (!freshFolder.isEnabled()) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Folder is no longer enabled");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_FOLDER_DISABLED);
         }
         Folder.Sharing current = freshFolder.getSharing();
         if (current == null || !current.allows(requiredSharing)) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Folder sharing changed (required=" + requiredSharing + ", current=" + current + ")");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_SHARING_CHANGED,
+                    java.util.Map.of("required", requiredSharing.name(),
+                            "current", current == null ? "null" : current.name()));
         }
         Device folderOwnerDevice = freshFolder.getDevice();
         Device expectedOwnerDevice = callerIsReceiver ? sender : receiver;
         if (!folderOwnerDevice.getId().equals(expectedOwnerDevice.getId())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Folder no longer owned by expected device");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_FOLDER_REASSIGNED);
         }
 
         Transfer copy = new Transfer();
@@ -282,8 +281,8 @@ public class TransferHistoryService {
 
     private void requireActive(Device device, String role) {
         if (device.getStatus() != Device.Status.ACTIVE) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    role + " device is not ACTIVE (status=" + device.getStatus() + ")");
+            throw new ApiException(ApiErrorCode.TRANSFER_RETRY_DEVICE_NOT_ACTIVE,
+                    java.util.Map.of("role", role, "status", device.getStatus().name()));
         }
     }
 
@@ -312,7 +311,7 @@ public class TransferHistoryService {
             long id = node.get("i").asLong();
             return new Cursor(ZonedDateTime.parse(ts), id);
         } catch (Exception e) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid cursor");
+            throw new ApiException(ApiErrorCode.TRANSFER_INVALID_CURSOR);
         }
     }
 

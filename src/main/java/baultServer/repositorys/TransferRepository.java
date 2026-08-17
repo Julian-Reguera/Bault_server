@@ -58,4 +58,22 @@ public interface TransferRepository extends JpaRepository<Transfer, Long>, JpaSp
            ORDER BY t.receiver.alias
            """)
     List<Device> distinctReceiversForUser(@Param("user") User user);
+
+    /**
+     * Transferencias third-party en estado {@code status} en las que {@code device}
+     * participa como sender o receiver pero no es el owner. Usado por los peers para
+     * descubrir transferencias que un tercer device orquestó para ellos (por si perdieron
+     * la notificación WS por estar offline).
+     */
+    @Query("""
+           SELECT t FROM Transfer t
+           WHERE t.status = :status
+             AND (t.sender.id = :deviceId OR t.receiver.id = :deviceId)
+             AND t.owner.id <> :deviceId
+             AND t.owner.id <> t.sender.id
+             AND t.owner.id <> t.receiver.id
+           ORDER BY t.createdAt DESC
+           """)
+    List<Transfer> findThirdPartyByPeerAndStatus(@Param("deviceId") Long deviceId,
+                                                 @Param("status") Transfer.Status status);
 }

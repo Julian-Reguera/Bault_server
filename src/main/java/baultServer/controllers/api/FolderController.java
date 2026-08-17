@@ -15,11 +15,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 
 import tools.jackson.databind.JsonNode;
 
 import baultServer.configs.http.JwtAuthenticationFilter;
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
 import baultServer.model.Device;
 import baultServer.model.Folder;
 import baultServer.model.User;
@@ -29,11 +30,6 @@ import baultServer.services.DeviceRpcService;
 import baultServer.services.DeviceService;
 import baultServer.services.FolderService;
 import jakarta.servlet.http.HttpServletRequest;
-
-import static org.springframework.http.HttpStatus.BAD_REQUEST;
-import static org.springframework.http.HttpStatus.FORBIDDEN;
-import static org.springframework.http.HttpStatus.NOT_FOUND;
-import static org.springframework.http.HttpStatus.UNAUTHORIZED;
 
 @RestController
 @RequestMapping("/api/folders")
@@ -71,7 +67,7 @@ public class FolderController {
         User user = currentUser(principal);
         Device device = deviceService.findByIdAndUser(deviceId, user);
         Map<String, Object> resultado = new HashMap<>();
-        
+
         resultado.put("folders", folderService.findSharedByDevice(device));
         resultado.put("folder-status", device.getStatus().toString());
         return resultado;
@@ -86,7 +82,7 @@ public class FolderController {
 
         JsonNode pathNode = body == null ? null : body.get("path");
         if (pathNode == null || pathNode.isNull() || !pathNode.isTextual() || pathNode.asText().isBlank()) {
-            throw new ResponseStatusException(BAD_REQUEST, "Missing or invalid field: path");
+            throw ApiException.of(ApiErrorCode.MISSING_FIELD, "field", "path");
         }
         Folder.Sharing sharing = parseSharing(body.get("sharing"), Folder.Sharing.NONE);
         boolean encrypted = body.hasNonNull("encrypted") && body.get("encrypted").asBoolean(false);
@@ -109,11 +105,9 @@ public class FolderController {
                                              HttpServletRequest request) {
         User user = currentUser(principal);
         Folder folder = loadFolderOwnedByCaller(folderId, user, request);
-
-        if(!folder.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder is disabled");
+        if (!folder.isEnabled()) {
+            throw new ApiException(ApiErrorCode.FOLDER_DISABLED);
         }
-
         folderService.unshare(folder);
         return ResponseEntity.noContent().build();
     }
@@ -125,18 +119,17 @@ public class FolderController {
                                                HttpServletRequest request) {
         User user = currentUser(principal);
         Folder folder = loadFolderOwnedByCaller(folderId, user, request);
-
-        if(!folder.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder is disabled");
+        if (!folder.isEnabled()) {
+            throw new ApiException(ApiErrorCode.FOLDER_DISABLED);
         }
 
         JsonNode sharingNode = body == null ? null : body.get("sharing");
         if (sharingNode == null || sharingNode.isNull()) {
-            throw new ResponseStatusException(BAD_REQUEST, "Missing field: sharing");
+            throw ApiException.of(ApiErrorCode.MISSING_FIELD, "field", "sharing");
         }
         Folder.Sharing sharing = parseSharing(sharingNode, null);
         if (sharing == null) {
-            throw new ResponseStatusException(BAD_REQUEST, "Invalid sharing value");
+            throw new ApiException(ApiErrorCode.FOLDER_INVALID_SHARING);
         }
         return folderService.updateSharing(folder, sharing).toTransfer();
     }
@@ -148,19 +141,20 @@ public class FolderController {
         User user = currentUser(principal);
 
         Folder folder = folderRepository.findById(folderId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Folder not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.FOLDER_NOT_FOUND));
 
-        if(!folder.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder is disabled");
+        if (!folder.isEnabled()) {
+            throw new ApiException(ApiErrorCode.FOLDER_DISABLED);
         }
-        
+
         Device ownerDevice = folder.getDevice();
         if (!ownerDevice.getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder does not belong to user");
+            throw new ApiException(ApiErrorCode.FOLDER_NOT_OWNED_BY_USER);
         }
-        if (!folder.isEnabled() || folder.getSharing() == null
-                || !folder.getSharing().allows(Folder.Sharing.READ)) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder not readable");
+        if (folder.getSharing() == null || !folder.getSharing().allows(Folder.Sharing.READ)) {
+            throw new ApiException(ApiErrorCode.FOLDER_SHARING_INSUFFICIENT,
+                    Map.of("required", Folder.Sharing.READ.name(),
+                            "current", folder.getSharing() == null ? "null" : folder.getSharing().name()));
         }
 
         String safePath = normalizeSubPath(path);
@@ -175,29 +169,29 @@ public class FolderController {
 
     private User currentUser(UserDetails principal) {
         return userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.USER_NOT_FOUND));
     }
 
     private Device requireCallerDevice(User user, HttpServletRequest request) {
         Object attr = request.getAttribute(JwtAuthenticationFilter.DEVICE_ID_ATTR);
         if (!(attr instanceof Long callerDeviceId)) {
-            throw new ResponseStatusException(UNAUTHORIZED, "Missing device in token");
+            throw new ApiException(ApiErrorCode.DEVICE_TOKEN_MISSING);
         }
         return deviceService.findByIdAndUser(callerDeviceId, user);
     }
 
     private Folder loadFolderOwnedByCaller(Long folderId, User user, HttpServletRequest request) {
         Folder folder = folderRepository.findById(folderId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Folder not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.FOLDER_NOT_FOUND));
         if (!folder.getDevice().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Folder does not belong to user");
+            throw new ApiException(ApiErrorCode.FOLDER_NOT_OWNED_BY_USER);
         }
         Object attr = request.getAttribute(JwtAuthenticationFilter.DEVICE_ID_ATTR);
         if (!(attr instanceof Long callerDeviceId)) {
-            throw new ResponseStatusException(UNAUTHORIZED, "Missing device in token");
+            throw new ApiException(ApiErrorCode.DEVICE_TOKEN_MISSING);
         }
         if (!callerDeviceId.equals(folder.getDevice().getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Only the owner device may modify this folder");
+            throw new ApiException(ApiErrorCode.FOLDER_NOT_OWNED_BY_DEVICE);
         }
         return folder;
     }
@@ -221,7 +215,7 @@ public class FolderController {
         }
         for (String segment : normalized.split("/")) {
             if (segment.equals("..")) {
-                throw new ResponseStatusException(FORBIDDEN, "Path traversal not allowed");
+                throw new ApiException(ApiErrorCode.FOLDER_PATH_TRAVERSAL);
             }
         }
         return normalized;

@@ -8,11 +8,11 @@ import java.time.ZonedDateTime;
 import java.util.Base64;
 import java.util.List;
 
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
 import baultServer.exceptions.DeviceAuthenticationException;
 import baultServer.exceptions.DeviceBlockedException;
 import baultServer.exceptions.DeviceRemovedException;
@@ -50,7 +50,7 @@ public class DeviceService {
 
     public Device findByIdAndUser(Long deviceId, User user) {
         return repository.findByIdAndUser(deviceId, user)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Device not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.DEVICE_NOT_FOUND));
     }
 
     public List<Device.Transfer> findByUserWithPresence(User user) {
@@ -106,15 +106,14 @@ public class DeviceService {
     @Transactional
     public Device activate(Device device) {
         if (device.getStatus() == Device.Status.BLOCKED || device.getStatus() == Device.Status.REMOVED) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Cannot activate device in status " + device.getStatus());
+            throw new ApiException(ApiErrorCode.DEVICE_STATE_TRANSITION_INVALID,
+                    java.util.Map.of("action", "activate", "status", device.getStatus().name()));
         }
         if (device.getStatus() == Device.Status.ACTIVE) {
             return device;
         }
         if (!canAllocateActive(device.getUser())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Plan device limit reached");
+            throw new ApiException(ApiErrorCode.DEVICE_PLAN_LIMIT_REACHED);
         }
         device.setStatus(Device.Status.ACTIVE);
         device.setLastActivatedAt(ZonedDateTime.now());
@@ -126,8 +125,8 @@ public class DeviceService {
     @Transactional
     public Device deactivate(Device device) {
         if (device.getStatus() == Device.Status.BLOCKED || device.getStatus() == Device.Status.REMOVED) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Cannot deactivate device in status " + device.getStatus());
+            throw new ApiException(ApiErrorCode.DEVICE_STATE_TRANSITION_INVALID,
+                    java.util.Map.of("action", "deactivate", "status", device.getStatus().name()));
         }
         if (device.getStatus() == Device.Status.DISABLED) {
             return device;
@@ -135,8 +134,8 @@ public class DeviceService {
         ZonedDateTime lastActivated = device.getLastActivatedAt();
         if (lastActivated != null
                 && lastActivated.plusDays(DEACTIVATE_LOCK_DAYS).isAfter(ZonedDateTime.now())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Device cannot be deactivated within " + DEACTIVATE_LOCK_DAYS + " days of activation");
+            throw new ApiException(ApiErrorCode.DEVICE_DEACTIVATE_LOCKED,
+                    java.util.Map.of("lockDays", DEACTIVATE_LOCK_DAYS));
         }
         device.setStatus(Device.Status.DISABLED);
         Device saved = repository.save(device);
@@ -147,7 +146,8 @@ public class DeviceService {
     @Transactional
     public Device block(Device device) {
         if (device.getStatus() == Device.Status.REMOVED) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Cannot block a removed device");
+            throw new ApiException(ApiErrorCode.DEVICE_STATE_TRANSITION_INVALID,
+                    java.util.Map.of("action", "block", "status", device.getStatus().name()));
         }
         if (device.getStatus() == Device.Status.BLOCKED) {
             return device;
@@ -162,8 +162,8 @@ public class DeviceService {
     @Transactional
     public Device unblock(Device device) {
         if (device.getStatus() != Device.Status.BLOCKED) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "Only blocked devices can be unblocked (was " + device.getStatus() + ")");
+            throw new ApiException(ApiErrorCode.DEVICE_STATE_TRANSITION_INVALID,
+                    java.util.Map.of("action", "unblock", "status", device.getStatus().name()));
         }
         device.setStatus(Device.Status.DISABLED);
         Device saved = repository.save(device);

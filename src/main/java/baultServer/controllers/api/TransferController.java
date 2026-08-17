@@ -6,13 +6,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -28,7 +28,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseBody;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import tools.jackson.databind.JsonNode;
@@ -36,6 +35,9 @@ import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
 import baultServer.configs.http.JwtAuthenticationFilter;
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
+import baultServer.exceptions.UploaderDenialException;
 import baultServer.model.BillingPlan;
 import baultServer.model.Device;
 import baultServer.model.Folder;
@@ -44,10 +46,9 @@ import baultServer.model.User;
 import baultServer.repositorys.DevicePresenceRepository;
 import baultServer.repositorys.DeviceRepository;
 import baultServer.repositorys.FolderRepository;
+import baultServer.repositorys.TransferPipeRepository;
 import baultServer.repositorys.TransferRepository;
 import baultServer.repositorys.UserRepository;
-import baultServer.exceptions.UploaderDenialException;
-import baultServer.repositorys.TransferPipeRepository;
 import baultServer.services.CryptoService;
 import baultServer.services.EventWsBroadcaster;
 import baultServer.services.TransferHistoryService;
@@ -58,14 +59,6 @@ import baultServer.utils.streams.CountingOutputStream;
 import baultServer.utils.streams.StreamingPipe;
 import baultServer.utils.streams.ThrottledOutputStream;
 import jakarta.servlet.http.HttpServletRequest;
-
-import static org.springframework.http.HttpStatus.BAD_REQUEST;
-import static org.springframework.http.HttpStatus.CONFLICT;
-import static org.springframework.http.HttpStatus.FORBIDDEN;
-import static org.springframework.http.HttpStatus.GATEWAY_TIMEOUT;
-import static org.springframework.http.HttpStatus.NOT_FOUND;
-import static org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE;
-import static org.springframework.http.HttpStatus.UNAUTHORIZED;
 
 @RestController
 @RequestMapping("/api/transfers")
@@ -120,10 +113,6 @@ public class TransferController {
 
     // ===================== Histórico =====================
 
-    /**
-     * Listado paginado del histórico con filtros server-side. Devuelve además los
-     * dropdowns de emisores/receptores para no necesitar un endpoint aparte.
-     */
     @GetMapping(produces = "application/json")
     @ResponseBody
     public HistoryPage listHistory(@RequestParam(required = false, defaultValue = "all") String status,
@@ -139,10 +128,6 @@ public class TransferController {
         return historyService.list(user, filter, cursor, size);
     }
 
-    /**
-     * Reintenta una transferencia previa creando una nueva en PENDING.
-     * Ver {@link TransferHistoryService#retry} para las comprobaciones estrictas.
-     */
     @PostMapping(path = "/{transferId}/retry", produces = "application/json")
     @ResponseBody
     public Map<String, Object> retry(@PathVariable Long transferId,
@@ -154,7 +139,6 @@ public class TransferController {
         return Map.of("transferId", copy.getId());
     }
 
-    /** Export CSV en streaming. Aplica los mismos filtros que el listado. */
     @GetMapping(path = "/export-csv")
     public ResponseEntity<StreamingResponseBody> exportCsv(
             @RequestParam(required = false, defaultValue = "all") String status,
@@ -185,17 +169,13 @@ public class TransferController {
         try {
             return StatusFilter.valueOf(s.trim().toUpperCase());
         } catch (IllegalArgumentException e) {
-            throw new ResponseStatusException(BAD_REQUEST,
-                    "Invalid status filter (expected all|ok|active|failed): " + s);
+            throw new ApiException(ApiErrorCode.TRANSFER_INVALID_STATUS_FILTER,
+                    Map.of("value", s));
         }
     }
 
     // ===================== Solicitar transferencia =====================
 
-    /**
-     * El device actual (receiver) pide descargar un archivo que vive en una carpeta
-     * compartida de otro device suyo (sender). El sender debe estar online.
-     */
     @PostMapping(path = "/download-request", consumes = "application/json", produces = "application/json")
     @ResponseBody
     public Map<String, Object> downloadRequest(@RequestBody JsonNode body,
@@ -214,15 +194,15 @@ public class TransferController {
         String destinationPath = optionalText(body, "destinationPath");
         long fileSize = requireNonNegativeSize(body);
 
-        Device sender = loadPeerDevice(senderDeviceId, user, "Sender");
+        Device sender = loadPeerDevice(senderDeviceId, user);
         if (sender.getId().equals(receiver.getId())) {
-            throw new ResponseStatusException(BAD_REQUEST, "Sender and receiver must differ");
+            throw new ApiException(ApiErrorCode.TRANSFER_PEERS_MUST_DIFFER);
         }
 
-        Folder originFolder = loadFolderWithPermission(originFolderId, sender, Folder.Sharing.READ, "Origin folder");
+        Folder originFolder = loadFolderWithPermission(originFolderId, sender, Folder.Sharing.READ);
 
         if (!presenceRepository.isOnline(sender.getId())) {
-            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Sender device offline");
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, Map.of("role", "sender"));
         }
 
         checkMonthlyQuota(user, fileSize);
@@ -232,7 +212,6 @@ public class TransferController {
         transferRepository.save(transfer);
         eventBroadcaster.transferCreated(user.getId(), transfer.getId(), transfer.getStatus());
 
-        //Notificar al sender (peer) via WS para que decida aceptar (POST /upload) o rechazar (POST /deny).
         ObjectNode data = JsonNodeFactory.instance.objectNode();
         data.put("transferId", transfer.getId());
         data.put("requesterDeviceId", receiver.getId());
@@ -245,10 +224,6 @@ public class TransferController {
         return Map.of("transferId", transfer.getId());
     }
 
-    /**
-     * El device actual (sender) pide enviar un archivo suyo a otro device suyo (receiver),
-     * dejandolo en una carpeta compartida del receiver. El receiver debe estar online.
-     */
     @PostMapping(path = "/upload-request", consumes = "application/json", produces = "application/json")
     @ResponseBody
     public Map<String, Object> uploadRequest(@RequestBody JsonNode body,
@@ -267,16 +242,16 @@ public class TransferController {
         String destinationPath = optionalText(body, "destinationPath");
         long fileSize = requireNonNegativeSize(body);
 
-        Device receiver = loadPeerDevice(receiverDeviceId, user, "Receiver");
+        Device receiver = loadPeerDevice(receiverDeviceId, user);
         if (sender.getId().equals(receiver.getId())) {
-            throw new ResponseStatusException(BAD_REQUEST, "Sender and receiver must differ");
+            throw new ApiException(ApiErrorCode.TRANSFER_PEERS_MUST_DIFFER);
         }
 
         Folder destinationFolder = loadFolderWithPermission(destinationFolderId, receiver,
-                Folder.Sharing.READ_WRITE, "Destination folder");
+                Folder.Sharing.READ_WRITE);
 
         if (!presenceRepository.isOnline(receiver.getId())) {
-            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Receiver device offline");
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, Map.of("role", "receiver"));
         }
 
         checkMonthlyQuota(user, fileSize);
@@ -286,7 +261,6 @@ public class TransferController {
         transferRepository.save(transfer);
         eventBroadcaster.transferCreated(user.getId(), transfer.getId(), transfer.getStatus());
 
-        //Notificar al receiver (peer) via WS para que decida aceptar (GET /download) o rechazar (POST /deny).
         ObjectNode data = JsonNodeFactory.instance.objectNode();
         data.put("transferId", transfer.getId());
         data.put("requesterDeviceId", sender.getId());
@@ -300,10 +274,116 @@ public class TransferController {
     }
 
     /**
-     * Devuelve, para cada folder implicada en la transferencia, si esta cifrada y (solo
-     * para el device que la necesita) la DEK en claro para poder cifrar/descifrar en el
-     * cliente. El sender recibe la DEK del origin folder; el receiver la del destination.
+     * Third-party: el device actual (owner) orquesta una transferencia entre otros dos devices
+     * del mismo usuario (sender y receiver), sin ser ninguno de los dos. Requiere ambas carpetas
+     * compartidas: la de origen con READ, la de destino con READ_WRITE.
      */
+    @PostMapping(path = "/third-party-request", consumes = "application/json", produces = "application/json")
+    @ResponseBody
+    public Map<String, Object> thirdPartyRequest(@RequestBody JsonNode body,
+                                                 @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+                                                 @AuthenticationPrincipal UserDetails principal,
+                                                 HttpServletRequest request) {
+        User user = currentUser(principal);
+        Device owner = currentDevice(request, user);
+
+        Map<String, Object> idem = idempotentResponse(owner, idempotencyKey);
+        if (idem != null) return idem;
+
+        Long senderDeviceId = requireLong(body, "senderDeviceId");
+        Long receiverDeviceId = requireLong(body, "receiverDeviceId");
+        Long originFolderId = requireLong(body, "originFolderId");
+        Long destinationFolderId = requireLong(body, "destinationFolderId");
+        String originPath = requireText(body, "originPath");
+        String destinationPath = optionalText(body, "destinationPath");
+        long fileSize = requireNonNegativeSize(body);
+
+        Device sender = loadPeerDevice(senderDeviceId, user);
+        Device receiver = loadPeerDevice(receiverDeviceId, user);
+        if (sender.getId().equals(receiver.getId())) {
+            throw new ApiException(ApiErrorCode.TRANSFER_PEERS_MUST_DIFFER);
+        }
+        if (owner.getId().equals(sender.getId()) || owner.getId().equals(receiver.getId())) {
+            throw new ApiException(ApiErrorCode.TRANSFER_OWNER_MUST_DIFFER_FROM_PEERS);
+        }
+
+        Folder originFolder = loadFolderWithPermission(originFolderId, sender, Folder.Sharing.READ);
+        Folder destinationFolder = loadFolderWithPermission(destinationFolderId, receiver,
+                Folder.Sharing.READ_WRITE);
+
+        if (!presenceRepository.isOnline(sender.getId())) {
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, Map.of("role", "sender"));
+        }
+        if (!presenceRepository.isOnline(receiver.getId())) {
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, Map.of("role", "receiver"));
+        }
+
+        checkMonthlyQuota(user, fileSize);
+
+        Transfer transfer = newPendingTransfer(sender, receiver, owner, originPath, destinationPath, idempotencyKey);
+        transfer.setOriginFolder(originFolder);
+        transfer.setDestinationFolder(destinationFolder);
+        transferRepository.save(transfer);
+        eventBroadcaster.transferCreated(user.getId(), transfer.getId(), transfer.getStatus());
+
+        //Notificar a ambos peers: sender debe hacer /upload, receiver debe hacer /download.
+        ObjectNode senderData = JsonNodeFactory.instance.objectNode();
+        senderData.put("transferId", transfer.getId());
+        senderData.put("requesterDeviceId", owner.getId());
+        senderData.put("originFolderId", originFolder.getId());
+        senderData.put("originPath", originPath);
+        if (destinationPath != null) senderData.put("destinationPath", destinationPath);
+        senderData.put("sizeBytes", fileSize);
+        senderData.put("thirdParty", true);
+        notifyDevice(sender.getId(), "transfer.upload-requested", senderData);
+
+        ObjectNode receiverData = JsonNodeFactory.instance.objectNode();
+        receiverData.put("transferId", transfer.getId());
+        receiverData.put("requesterDeviceId", owner.getId());
+        receiverData.put("destinationFolderId", destinationFolder.getId());
+        receiverData.put("originPath", originPath);
+        if (destinationPath != null) receiverData.put("destinationPath", destinationPath);
+        receiverData.put("sizeBytes", fileSize);
+        receiverData.put("thirdParty", true);
+        notifyDevice(receiver.getId(), "transfer.download-offered", receiverData);
+
+        return Map.of("transferId", transfer.getId());
+    }
+
+    /**
+     * Devuelve las transferencias PENDING third-party en las que el device actual participa
+     * (como sender o receiver) pero no es el owner. Sirve para descubrir peticiones creadas
+     * por un tercer device del mismo usuario que se pudieron perder por estar offline.
+     */
+    @GetMapping(path = "/pending-as-peer", produces = "application/json")
+    @ResponseBody
+    public Map<String, Object> pendingAsPeer(@AuthenticationPrincipal UserDetails principal,
+                                             HttpServletRequest request) {
+        User user = currentUser(principal);
+        Device caller = currentDevice(request, user);
+
+        java.util.List<Map<String, Object>> items = transferRepository
+                .findThirdPartyByPeerAndStatus(caller.getId(), Transfer.Status.PENDING)
+                .stream()
+                .map(t -> {
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("transferId", t.getId());
+                    m.put("ownerDeviceId", t.getOwner().getId());
+                    m.put("senderDeviceId", t.getSender().getId());
+                    m.put("receiverDeviceId", t.getReceiver().getId());
+                    m.put("role", caller.getId().equals(t.getSender().getId()) ? "sender" : "receiver");
+                    m.put("originFolderId", t.getOriginFolder() == null ? null : t.getOriginFolder().getId());
+                    m.put("destinationFolderId", t.getDestinationFolder() == null ? null : t.getDestinationFolder().getId());
+                    m.put("originPath", t.getOriginPath());
+                    m.put("destinationPath", t.getDestinationPath());
+                    m.put("sizeBytes", t.getSizeBytes());
+                    m.put("createdAt", t.getCreatedAt());
+                    return m;
+                })
+                .toList();
+        return Map.of("transfers", items);
+    }
+
     @GetMapping(path = "/{transferId}/keys", produces = "application/json")
     @ResponseBody
     public ObjectNode transferKeys(@PathVariable Long transferId,
@@ -312,16 +392,16 @@ public class TransferController {
         User user = currentUser(principal);
         Device caller = currentDevice(request, user);
         Transfer transfer = transferRepository.findById(transferId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Transfer not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
         if (!transfer.getOwner().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Transfer does not belong to user");
+            throw new ApiException(ApiErrorCode.TRANSFER_NOT_OWNED_BY_USER);
         }
         boolean isSender = transfer.getSender() != null
                 && caller.getId().equals(transfer.getSender().getId());
         boolean isReceiver = transfer.getReceiver() != null
                 && caller.getId().equals(transfer.getReceiver().getId());
         if (!isSender && !isReceiver) {
-            throw new ResponseStatusException(FORBIDDEN, "Only sender or receiver may fetch keys");
+            throw new ApiException(ApiErrorCode.TRANSFER_KEYS_FORBIDDEN);
         }
 
         ObjectNode root = JsonNodeFactory.instance.objectNode();
@@ -350,23 +430,22 @@ public class TransferController {
         return node;
     }
 
-    /** Cancela una transferencia que aun no ha comenzado. Puede hacerlo cualquier device del usuario receiver. */
     @DeleteMapping("/{transferId}/cancel")
     public ResponseEntity<Void> cancel(@PathVariable Long transferId,
                                        @AuthenticationPrincipal UserDetails principal,
                                        HttpServletRequest request) {
         User user = currentUser(principal);
-        currentDevice(request, user); //valida que el JWT trae un device valido y habilitado del usuario
+        currentDevice(request, user);
 
         Transfer transfer = transferRepository.findById(transferId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Transfer not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
 
         if (!transfer.getOwner().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Transfer does not belong to user");
+            throw new ApiException(ApiErrorCode.TRANSFER_NOT_OWNED_BY_USER);
         }
         if (transfer.getStatus() != Transfer.Status.PENDING) {
-            throw new ResponseStatusException(CONFLICT,
-                    "Cannot cancel transfer in status " + transfer.getStatus());
+            throw new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
+                    Map.of("action", "cancel", "status", transfer.getStatus().name()));
         }
 
         transfer.setStatus(Transfer.Status.CANCELLED);
@@ -377,11 +456,6 @@ public class TransferController {
         return ResponseEntity.noContent().build();
     }
 
-    /**
-     * El peer al que se le solicito la transferencia la rechaza. Solo puede llamarlo el
-     * device peer (el sender en download-request, el receiver en upload-request), no el owner.
-     * Si el otro extremo estaba esperando en el pipe, se le aborta para que reciba error.
-     */
     @PostMapping("/{transferId}/deny")
     public ResponseEntity<Void> deny(@PathVariable Long transferId,
                                      @AuthenticationPrincipal UserDetails principal,
@@ -390,24 +464,22 @@ public class TransferController {
         Device caller = currentDevice(request, user);
 
         Transfer transfer = transferRepository.findById(transferId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Transfer not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
 
-        //Debe pertenecer al mismo user (defense-in-depth; sender/receiver ya son del mismo user por creacion).
         if (!transfer.getOwner().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Transfer does not belong to user");
+            throw new ApiException(ApiErrorCode.TRANSFER_NOT_OWNED_BY_USER);
         }
 
-        //El denier debe ser el peer (no el owner) y formar parte de la transaccion.
         Device peer = transfer.getOwner().getId().equals(transfer.getSender().getId())
                 ? transfer.getReceiver() : transfer.getSender();
         if (!caller.getId().equals(peer.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Only the requested peer device may deny");
+            throw new ApiException(ApiErrorCode.TRANSFER_ONLY_PEER_MAY_DENY);
         }
 
         if (transfer.getStatus() != Transfer.Status.PENDING
                 && transfer.getStatus() != Transfer.Status.IN_PROGRESS) {
-            throw new ResponseStatusException(CONFLICT,
-                    "Cannot deny transfer in status " + transfer.getStatus());
+            throw new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
+                    Map.of("action", "deny", "status", transfer.getStatus().name()));
         }
 
         transfer.setStatus(Transfer.Status.DENIED);
@@ -416,13 +488,11 @@ public class TransferController {
         transferRepository.save(transfer);
         eventBroadcaster.transferUpdated(user.getId(), transfer.getId(), transfer.getStatus());
 
-        //Desbloquear al otro extremo si estaba esperando en el pipe (metadata o rendezvous).
         StreamingPipe pipe = pipeRegistry.get(transferId);
         if (pipe != null) {
             pipe.abort(new RuntimeException("Denied by peer"));
         }
 
-        //Notificar al owner via WS.
         ObjectNode data = JsonNodeFactory.instance.objectNode();
         data.put("transferId", transferId);
         data.put("reason", "Denied by peer");
@@ -441,27 +511,28 @@ public class TransferController {
         User user = currentUser(principal);
         Device caller = currentDevice(request, user);
         Transfer transfer = transferRepository.findById(transferId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Transfer not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
         //Upload solo si el downloader ya ha empezado (transfer en IN_PROGRESS)
         if (transfer.getStatus() != Transfer.Status.IN_PROGRESS) {
-            throw new ResponseStatusException(CONFLICT,
-                    "Upload requires transfer to be IN_PROGRESS (was " + transfer.getStatus() + ")");
+            throw new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
+                    Map.of("action", "upload", "expected", Transfer.Status.IN_PROGRESS.name(),
+                            "status", transfer.getStatus().name()));
         }
 
         if (!transfer.getSender().getId().equals(caller.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Only the sender device may upload");
+            throw new ApiException(ApiErrorCode.TRANSFER_ONLY_SENDER_MAY_UPLOAD);
         }
         if (!transfer.getSender().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Sender not owned by user");
+            throw new ApiException(ApiErrorCode.TRANSFER_SENDER_NOT_OWNED_BY_USER);
         }
 
         if (!presenceRepository.isOnline(transfer.getReceiver().getId())) {
-            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Receiver device offline");
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, Map.of("role", "receiver"));
         }
 
         StreamingPipe pipe = pipeRegistry.getOrCreate(transferId);
         if (!pipe.claimUploader()) {
-            throw new ResponseStatusException(CONFLICT, "Upload already in progress");
+            throw new ApiException(ApiErrorCode.TRANSFER_UPLOAD_IN_PROGRESS);
         }
 
         CountingOutputStream counting = new CountingOutputStream(pipe.sink());
@@ -469,7 +540,6 @@ public class TransferController {
         try {
             pipe.publishMetadata(filename, contentType, declaredSize);
 
-            //Avisar al receiver de que ya hay metadata publicada (util para la UI de descarga).
             ObjectNode uploadStartedData = JsonNodeFactory.instance.objectNode();
             uploadStartedData.put("transferId", transferId);
             if (filename != null) uploadStartedData.put("filename", filename);
@@ -480,7 +550,7 @@ public class TransferController {
             if (!pipe.awaitRendezvous(RENDEZVOUS_TIMEOUT_MS)) {
                 pipe.abort(new RuntimeException("Downloader did not arrive"));
                 markFailed(transfer, counting.getCount(), "Downloader did not connect");
-                throw new ResponseStatusException(GATEWAY_TIMEOUT, "Downloader did not connect");
+                throw new ApiException(ApiErrorCode.TRANSFER_DOWNLOADER_TIMEOUT);
             }
 
             try (InputStream in = request.getInputStream()) {
@@ -496,11 +566,13 @@ public class TransferController {
             Thread.currentThread().interrupt();
             pipe.abort(e);
             markFailed(transfer, counting.getCount(), "Interrupted");
-            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Interrupted");
+            throw new ApiException(ApiErrorCode.TRANSFER_INTERRUPTED);
+        } catch (ApiException e) {
+            throw e;
         } catch (Exception e) {
             pipe.abort(e);
             markFailed(transfer, counting.getCount(), e.getMessage());
-            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Upload failed: " + e.getMessage());
+            throw new ApiException(ApiErrorCode.TRANSFER_UPLOAD_FAILED, e.getMessage());
         } finally {
             pipe.release();
         }
@@ -515,32 +587,30 @@ public class TransferController {
         Transfer transfer = loadPendingTransfer(transferId);
 
         if (!transfer.getReceiver().getId().equals(caller.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Only the receiver device may download");
+            throw new ApiException(ApiErrorCode.TRANSFER_ONLY_RECEIVER_MAY_DOWNLOAD);
         }
         if (!transfer.getReceiver().getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Receiver not owned by user");
+            throw new ApiException(ApiErrorCode.TRANSFER_RECEIVER_NOT_OWNED_BY_USER);
         }
 
         if (!presenceRepository.isOnline(transfer.getSender().getId())) {
-            throw new ResponseStatusException(SERVICE_UNAVAILABLE, "Sender device offline");
+            throw new ApiException(ApiErrorCode.DEVICE_OFFLINE, Map.of("role", "sender"));
         }
 
-        //Limite de concurrencia por plan (0 = ilimitado). Se comprueba antes de mover a IN_PROGRESS.
         BillingPlan plan = user.getBillingPlan();
         if (plan == null) {
-            throw new ResponseStatusException(FORBIDDEN, "User has no billing plan");
+            throw new ApiException(ApiErrorCode.TRANSFER_MISSING_PLAN);
         }
         int maxConcurrent = plan.getMaxConcurrentTransfers();
         if (maxConcurrent > 0) {
             long inProgress = transferRepository
                     .countByOwnerUserAndStatus(user, Transfer.Status.IN_PROGRESS);
             if (inProgress >= maxConcurrent) {
-                throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,
-                        "Concurrent transfer limit reached (" + maxConcurrent + ")");
+                throw new ApiException(ApiErrorCode.TRANSFER_CONCURRENT_LIMIT,
+                        Map.of("maxConcurrent", maxConcurrent));
             }
         }
 
-        //Transicion PENDING -> IN_PROGRESS
         transfer.setStatus(Transfer.Status.IN_PROGRESS);
         transfer.setStartedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
@@ -550,10 +620,9 @@ public class TransferController {
 
         StreamingPipe pipe = pipeRegistry.getOrCreate(transferId);
         if (!pipe.claimDownloader()) {
-            throw new ResponseStatusException(CONFLICT, "Download already in progress");
+            throw new ApiException(ApiErrorCode.TRANSFER_DOWNLOAD_IN_PROGRESS);
         }
 
-        //Avisar al sender de que el receiver ya esta en el pipe, para que lance su /upload.
         ObjectNode downloadStartedData = JsonNodeFactory.instance.objectNode();
         downloadStartedData.put("transferId", transferId);
         notifyDevice(transfer.getSender().getId(), "transfer.download-started", downloadStartedData);
@@ -566,20 +635,22 @@ public class TransferController {
                     "DENIED:" + denied.getCode().name()
                             + (denied.getMessage() == null ? "" : ":" + denied.getMessage()));
             pipe.release();
-            HttpStatus status = switch (denied.getCode()) {
-                case FILE_NOT_FOUND -> HttpStatus.GONE;
-                case FOLDER_NOT_SHARED, ACCESS_DENIED -> HttpStatus.FORBIDDEN;
-                case FILE_TOO_LARGE -> HttpStatus.CONTENT_TOO_LARGE;
-                case OTHER -> HttpStatus.FAILED_DEPENDENCY;
+            ApiErrorCode code = switch (denied.getCode()) {
+                case FILE_NOT_FOUND -> ApiErrorCode.TRANSFER_SENDER_DENIED_FILE_NOT_FOUND;
+                case FOLDER_NOT_SHARED -> ApiErrorCode.TRANSFER_SENDER_DENIED_FOLDER_NOT_SHARED;
+                case ACCESS_DENIED -> ApiErrorCode.TRANSFER_SENDER_DENIED_ACCESS_DENIED;
+                case FILE_TOO_LARGE -> ApiErrorCode.TRANSFER_SENDER_DENIED_FILE_TOO_LARGE;
+                case OTHER -> ApiErrorCode.TRANSFER_SENDER_DENIED_OTHER;
             };
-            throw new ResponseStatusException(status,
-                    "Sender denied: " + denied.getCode()
-                            + (denied.getMessage() == null ? "" : " (" + denied.getMessage() + ")"));
+            Map<String, Object> details = new LinkedHashMap<>();
+            details.put("senderCode", denied.getCode().name());
+            if (denied.getMessage() != null) details.put("senderMessage", denied.getMessage());
+            throw new ApiException(code, details);
         } catch (TimeoutException e) {
             pipe.abort(e);
             markFailed(transfer, 0L, "Uploader did not start");
             pipe.release();
-            throw new ResponseStatusException(GATEWAY_TIMEOUT, "Uploader did not start");
+            throw new ApiException(ApiErrorCode.TRANSFER_UPLOADER_TIMEOUT);
         }
 
         HttpHeaders headers = new HttpHeaders();
@@ -598,7 +669,6 @@ public class TransferController {
             try (InputStream source = pipe.source()) {
                 source.transferTo(counting);
                 counting.flush();
-                //Upload ya guardo sizeBytes al terminar; solo cambiamos estado.
                 markCompleted(transfer);
             } catch (Exception e) {
                 pipe.abort(e);
@@ -612,11 +682,6 @@ public class TransferController {
         return ResponseEntity.ok().headers(headers).body(body);
     }
 
-    /**
-     * Resuelve la velocidad de descarga aplicable a un usuario:
-     * min(plan, techo servidor), tratando 0 como "sin limite" en cada lado.
-     * Devuelve 0 si no hay ninguna limitacion.
-     */
     private long resolveDownloadRate(User user) {
         BillingPlan plan = user.getBillingPlan();
         long planBytesPerSec = 0L;
@@ -630,7 +695,6 @@ public class TransferController {
 
     // ----- helpers -----
 
-    /** Envia un mensaje STOMP al device destino con el envelope {op, data}. */
     private void notifyDevice(Long deviceId, String op, ObjectNode data) {
         ObjectNode envelope = JsonNodeFactory.instance.objectNode();
         envelope.put("op", op);
@@ -640,30 +704,32 @@ public class TransferController {
 
     private User currentUser(UserDetails principal) {
         return userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.USER_NOT_FOUND));
     }
 
     private Device currentDevice(HttpServletRequest request, User user) {
         Object attr = request.getAttribute(JwtAuthenticationFilter.DEVICE_ID_ATTR);
         if (!(attr instanceof Long deviceId)) {
-            throw new ResponseStatusException(UNAUTHORIZED, "Missing device in token");
+            throw new ApiException(ApiErrorCode.DEVICE_TOKEN_MISSING);
         }
         Device device = deviceRepository.findById(deviceId)
-                .orElseThrow(() -> new ResponseStatusException(UNAUTHORIZED, "Unknown device"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.DEVICE_TOKEN_UNKNOWN));
         if (!device.getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, "Device does not belong to user");
+            throw new ApiException(ApiErrorCode.DEVICE_NOT_OWNED_BY_USER);
         }
         if (device.getStatus() != Device.Status.ACTIVE) {
-            throw new ResponseStatusException(FORBIDDEN, "Device not active");
+            throw new ApiException(ApiErrorCode.DEVICE_NOT_ACTIVE);
         }
         return device;
     }
 
     private Transfer loadPendingTransfer(Long id) {
         Transfer transfer = transferRepository.findById(id)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "Transfer not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
         if (transfer.getStatus() != Transfer.Status.PENDING) {
-            throw new ResponseStatusException(CONFLICT, "Transfer not pending (status=" + transfer.getStatus() + ")");
+            throw new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
+                    Map.of("action", "download", "expected", Transfer.Status.PENDING.name(),
+                            "status", transfer.getStatus().name()));
         }
         return transfer;
     }
@@ -676,7 +742,6 @@ public class TransferController {
                 transfer.getId(), transfer.getStatus());
     }
 
-    /** Devuelve la respuesta idempotente si ya existia una transferencia con esa key para el owner. */
     private Map<String, Object> idempotentResponse(Device owner, String idempotencyKey) {
         if (idempotencyKey == null || idempotencyKey.isBlank()) return null;
         var existing = transferRepository.findByOwnerAndIdempotencyKey(owner, idempotencyKey);
@@ -688,64 +753,55 @@ public class TransferController {
     private long requireNonNegativeSize(JsonNode body) {
         long size = requireLong(body, "sizeBytes");
         if (size < 0) {
-            throw new ResponseStatusException(BAD_REQUEST, "sizeBytes must be >= 0");
+            throw new ApiException(ApiErrorCode.TRANSFER_SIZE_NEGATIVE);
         }
         return size;
     }
 
-    /** Carga un device peer y valida ownership y enabled. {@code role} solo para mensajes. */
-    private Device loadPeerDevice(Long deviceId, User user, String role) {
+    private Device loadPeerDevice(Long deviceId, User user) {
         Device device = deviceRepository.findById(deviceId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, role + " device not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.DEVICE_NOT_FOUND));
         if (!device.getUser().getId().equals(user.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, role + " device does not belong to user");
+            throw new ApiException(ApiErrorCode.DEVICE_NOT_OWNED_BY_USER);
         }
         if (device.getStatus() != Device.Status.ACTIVE) {
-            throw new ResponseStatusException(FORBIDDEN, role + " device not active");
+            throw new ApiException(ApiErrorCode.DEVICE_NOT_ACTIVE);
         }
         return device;
     }
 
-    /**
-     * Carga una folder y valida que pertenece a {@code ownerDevice}, esta enabled y su nivel
-     * de sharing permite al menos {@code required}. READ para descargar de ella, READ_WRITE
-     * para escribir en ella.
-     */
-    private Folder loadFolderWithPermission(Long folderId, Device ownerDevice,
-                                            Folder.Sharing required, String role) {
+    private Folder loadFolderWithPermission(Long folderId, Device ownerDevice, Folder.Sharing required) {
         Folder folder = folderRepository.findById(folderId)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, role + " not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.FOLDER_NOT_FOUND));
         if (!folder.getDevice().getId().equals(ownerDevice.getId())) {
-            throw new ResponseStatusException(FORBIDDEN, role + " does not belong to the expected device");
+            throw new ApiException(ApiErrorCode.FOLDER_NOT_OWNED_BY_DEVICE);
         }
         if (!folder.isEnabled()) {
-            throw new ResponseStatusException(FORBIDDEN, role + " disabled");
+            throw new ApiException(ApiErrorCode.FOLDER_DISABLED);
         }
         Folder.Sharing current = folder.getSharing();
         if (current == null || !current.allows(required)) {
-            throw new ResponseStatusException(FORBIDDEN,
-                    role + " requires " + required + " (current=" + current + ")");
+            throw new ApiException(ApiErrorCode.FOLDER_SHARING_INSUFFICIENT,
+                    Map.of("required", required.name(),
+                            "current", current == null ? "null" : current.name()));
         }
         return folder;
     }
 
-    /** Aplica el limite mensual de trafico del plan (0 = ilimitado). */
     private void checkMonthlyQuota(User user, long fileSize) {
         BillingPlan plan = user.getBillingPlan();
         if (plan == null) {
-            throw new ResponseStatusException(FORBIDDEN, "User has no billing plan");
+            throw new ApiException(ApiErrorCode.TRANSFER_MISSING_PLAN);
         }
         long quotaBytes = (long) plan.getMaxTraffic() * BYTES_PER_MB;
         if (quotaBytes <= 0) return;
         long usedBytes = transferRepository.sumSizeBytesSince(user, ZonedDateTime.now().minusMonths(1));
         if (usedBytes + fileSize > quotaBytes) {
-            throw new ResponseStatusException(HttpStatus.INSUFFICIENT_STORAGE,
-                    "Monthly quota exceeded (used=" + usedBytes + " + file=" + fileSize
-                            + " > quota=" + quotaBytes + ")");
+            throw new ApiException(ApiErrorCode.TRANSFER_MONTHLY_QUOTA_EXCEEDED,
+                    Map.of("usedBytes", usedBytes, "fileBytes", fileSize, "quotaBytes", quotaBytes));
         }
     }
 
-    /** Crea la esqueleto de Transfer PENDING sin folders (las setea el caller). */
     private Transfer newPendingTransfer(Device sender, Device receiver, Device owner,
                                         String originPath, String destinationPath,
                                         String idempotencyKey) {
@@ -782,7 +838,7 @@ public class TransferController {
     private static String requireText(JsonNode body, String field) {
         JsonNode node = body == null ? null : body.get(field);
         if (node == null || node.isNull() || !node.isTextual() || node.asText().isBlank()) {
-            throw new ResponseStatusException(BAD_REQUEST, "Missing or invalid field: " + field);
+            throw ApiException.of(ApiErrorCode.MISSING_FIELD, "field", field);
         }
         return node.asText();
     }
@@ -795,15 +851,15 @@ public class TransferController {
     private static Long requireLong(JsonNode body, String field) {
         JsonNode node = body == null ? null : body.get(field);
         if (node == null || node.isNull()) {
-            throw new ResponseStatusException(BAD_REQUEST, "Missing field: " + field);
+            throw ApiException.of(ApiErrorCode.MISSING_FIELD, "field", field);
         }
         if (node.isNumber()) return node.asLong();
         if (node.isTextual()) {
             try { return Long.parseLong(node.asText()); }
             catch (NumberFormatException e) {
-                throw new ResponseStatusException(BAD_REQUEST, "Invalid number: " + field);
+                throw ApiException.of(ApiErrorCode.INVALID_FIELD, "field", field);
             }
         }
-        throw new ResponseStatusException(BAD_REQUEST, "Invalid field: " + field);
+        throw ApiException.of(ApiErrorCode.INVALID_FIELD, "field", field);
     }
 }

@@ -7,16 +7,15 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
 import baultServer.model.User;
 import baultServer.repositorys.UserRepository;
 import baultServer.services.AccountService;
 import baultServer.services.AccountService.AccountDto;
 import baultServer.services.PlanService;
 import baultServer.services.PlanService.PlanDto;
-
-import static org.springframework.http.HttpStatus.NOT_FOUND;
 
 @RestController
 @RequestMapping("/api")
@@ -46,6 +45,6 @@ public class ApiController {
 
     private User currentUser(UserDetails principal) {
         return userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.USER_NOT_FOUND));
     }
 }

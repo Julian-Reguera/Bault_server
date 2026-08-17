@@ -8,11 +8,11 @@ import java.time.ZonedDateTime;
 import java.util.Base64;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiException;
 import baultServer.model.Device;
 import baultServer.model.RefreshToken;
 import baultServer.model.User;
@@ -56,21 +56,24 @@ public class RefreshTokenService {
     @Transactional
     public Rotated rotate(String rawToken) {
         RefreshToken current = repository.findByTokenHash(hash(rawToken))
-                .orElseThrow(() -> unauthorized("Invalid refresh token"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.REFRESH_TOKEN_INVALID));
 
         if (current.isRevoked()) {
             repository.revokeAllByDevice(current.getDevice());
-            throw unauthorized("Refresh token reuse detected");
+            throw new ApiException(ApiErrorCode.REFRESH_TOKEN_REUSED);
         }
 
         if (current.getExpiresAt().isBefore(ZonedDateTime.now())) {
-            throw unauthorized("Refresh token expired");
+            throw new ApiException(ApiErrorCode.REFRESH_TOKEN_EXPIRED);
         }
 
         Device.Status status = current.getDevice().getStatus();
         if (status == Device.Status.BLOCKED || status == Device.Status.REMOVED) {
             repository.revokeAllByDevice(current.getDevice());
-            throw unauthorized("Device " + status);
+            throw new ApiException(
+                    status == Device.Status.BLOCKED
+                            ? ApiErrorCode.DEVICE_BLOCKED
+                            : ApiErrorCode.DEVICE_NOT_FOUND);
         }
 
         current.setRevoked(true);
@@ -112,10 +115,6 @@ public class RefreshTokenService {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 not available", e);
         }
-    }
-
-    private ResponseStatusException unauthorized(String msg) {
-        return new ResponseStatusException(HttpStatus.UNAUTHORIZED, msg);
     }
 
     public record Rotated(User user, Device device, String rawToken) {}

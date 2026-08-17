@@ -56,7 +56,7 @@ class AuthFlowE2ETest extends AbstractE2ETest {
     }
 
     @Test
-    @DisplayName("Login antes de verificar el email devuelve 403 con error 'email_not_verified'")
+    @DisplayName("Login antes de verificar el email devuelve 403 con code 'EMAIL_NOT_VERIFIED'")
     void loginBeforeVerificationIsRejected() {
         String email = uniqueEmail();
         String password = "SuperSecret123!";
@@ -68,9 +68,10 @@ class AuthFlowE2ETest extends AbstractE2ETest {
                 Map.of("email", email, "password", password));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        assertThat(response.getBody())
-                .containsEntry("error", "email_not_verified")
-                .containsEntry("email", email);
+        assertThat(response.getBody()).containsEntry("code", "EMAIL_NOT_VERIFIED");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> details = (Map<String, Object>) response.getBody().get("details");
+        assertThat(details).containsEntry("email", email);
     }
 
     @Test

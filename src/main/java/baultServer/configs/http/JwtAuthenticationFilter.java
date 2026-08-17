@@ -4,6 +4,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -14,6 +17,10 @@ import org.springframework.security.web.authentication.WebAuthenticationDetailsS
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
+import tools.jackson.databind.ObjectMapper;
+
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiErrorResponse;
 import baultServer.model.Device;
 import baultServer.repositorys.DeviceRepository;
 import baultServer.services.JwtService;
@@ -34,13 +41,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final JwtService jwtService;
     private final UserDetailsService userDetailsService;
     private final DeviceRepository deviceRepository;
+    private final ObjectMapper objectMapper;
 
     public JwtAuthenticationFilter(JwtService jwtService,
                                    UserDetailsService userDetailsService,
-                                   DeviceRepository deviceRepository) {
+                                   DeviceRepository deviceRepository,
+                                   ObjectMapper objectMapper) {
         this.jwtService = jwtService;
         this.userDetailsService = userDetailsService;
         this.deviceRepository = deviceRepository;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -66,7 +76,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         if (device != null) {
                             Device.Status status = device.getStatus();
                             if (status == Device.Status.BLOCKED || status == Device.Status.REMOVED) {
-                                response.sendError(HttpServletResponse.SC_FORBIDDEN, "Device " + status);
+                                writeJsonError(response, HttpStatus.FORBIDDEN,
+                                        status == Device.Status.BLOCKED
+                                                ? ApiErrorCode.DEVICE_BLOCKED
+                                                : ApiErrorCode.DEVICE_NOT_FOUND);
                                 return;
                             }
                             if (status == Device.Status.ACTIVE) {
@@ -89,5 +102,12 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         }
 
         chain.doFilter(request, response);
+    }
+
+    private void writeJsonError(HttpServletResponse response, HttpStatus status, ApiErrorCode code)
+            throws IOException {
+        response.setStatus(status.value());
+        response.setHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE);
+        response.getWriter().write(objectMapper.writeValueAsString(ApiErrorResponse.of(code)));
     }
 }

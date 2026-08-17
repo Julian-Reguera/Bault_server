@@ -57,17 +57,27 @@ public class Transfer {
     @JoinColumn(name = "receiver_device_id")
     private Device receiver;
 
-    /** Device que inicio la transferencia. Coincide siempre con sender o con receiver. */
+    /**
+     * Device que inició la transferencia. Coincide con sender (upload-request), con receiver
+     * (download-request) o con un tercer device del mismo usuario (third-party-request).
+     * En este último caso {@code owner != sender && owner != receiver}.
+     */
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "owner_device_id", nullable = false)
     private Device owner;
 
-    /** Carpeta compartida del sender de la que sale el archivo (solo en download-request). */
+    /**
+     * Carpeta compartida del sender de la que sale el archivo. Se rellena en download-request
+     * y en third-party-request; null en upload-request.
+     */
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "origin_folder_id")
     private Folder originFolder;
 
-    /** Carpeta compartida del receiver donde se deja el archivo (solo en upload-request). */
+    /**
+     * Carpeta compartida del receiver donde se deja el archivo. Se rellena en upload-request
+     * y en third-party-request; null en download-request.
+     */
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "destination_folder_id")
     private Folder destinationFolder;

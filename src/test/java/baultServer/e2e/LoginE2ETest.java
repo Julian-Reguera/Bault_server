@@ -74,7 +74,7 @@ class LoginE2ETest extends AbstractE2ETest {
     // ---- 2. Email no verificado --------------------------------------------
 
     @Test
-    @DisplayName("Login antes de verificar email: 403 con body {error:email_not_verified,email}")
+    @DisplayName("Login antes de verificar email: 403 con code EMAIL_NOT_VERIFIED + details.email")
     void unverifiedEmailReturns403WithStructuredBody() {
         String email = uniqueEmail();
         //Registro sin confirmar código para dejar user.emailVerified=false.
@@ -86,9 +86,10 @@ class LoginE2ETest extends AbstractE2ETest {
                 Map.of("email", email, "password", DEFAULT_TEST_PASSWORD));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
-        assertThat(resp.getBody())
-                .containsEntry("error", "email_not_verified")
-                .containsEntry("email", email);
+        assertThat(resp.getBody()).containsEntry("code", "EMAIL_NOT_VERIFIED");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> details = (Map<String, Object>) resp.getBody().get("details");
+        assertThat(details).containsEntry("email", email);
     }
 
     // ---- 3. Login sin credenciales de device -------------------------------

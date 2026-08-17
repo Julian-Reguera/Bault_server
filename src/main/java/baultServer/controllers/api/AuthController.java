@@ -1,6 +1,8 @@
 package baultServer.controllers.api;
 
 import java.time.ZonedDateTime;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,18 +19,14 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.server.ResponseStatusException;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
-import baultServer.model.BillingPlan;
-import baultServer.model.Device;
-import baultServer.model.EmailCode;
-import baultServer.model.User;
-import baultServer.repositorys.BillingPlanRepository;
-import baultServer.repositorys.UserRepository;
+import baultServer.exceptions.ApiErrorCode;
+import baultServer.exceptions.ApiErrorResponse;
+import baultServer.exceptions.ApiException;
 import baultServer.exceptions.DeviceAuthenticationException;
 import baultServer.exceptions.DeviceBlockedException;
 import baultServer.exceptions.DeviceRemovedException;
@@ -37,6 +35,12 @@ import baultServer.exceptions.EmailCodeExpiredException;
 import baultServer.exceptions.EmailCodeInvalidException;
 import baultServer.exceptions.EmailCodeNotFoundException;
 import baultServer.exceptions.EmailDeliveryException;
+import baultServer.model.BillingPlan;
+import baultServer.model.Device;
+import baultServer.model.EmailCode;
+import baultServer.model.User;
+import baultServer.repositorys.BillingPlanRepository;
+import baultServer.repositorys.UserRepository;
 import baultServer.services.DeviceService;
 import baultServer.services.DeviceService.Registered;
 import baultServer.services.EmailCodeService;
@@ -44,19 +48,16 @@ import baultServer.services.JwtService;
 import baultServer.services.RefreshTokenService;
 import baultServer.services.RefreshTokenService.Rotated;
 
-import static org.springframework.http.HttpStatus.BAD_REQUEST;
-import static org.springframework.http.HttpStatus.CONFLICT;
-import static org.springframework.http.HttpStatus.FORBIDDEN;
-import static org.springframework.http.HttpStatus.GONE;
-import static org.springframework.http.HttpStatus.NOT_FOUND;
-import static org.springframework.http.HttpStatus.TOO_MANY_REQUESTS;
-import static org.springframework.http.HttpStatus.UNAUTHORIZED;
-
 @RestController
 @RequestMapping("/api/auth")
 public class AuthController {
 
     private static final Logger log = LoggerFactory.getLogger(AuthController.class);
+
+    //RFC 5322 simplificada: caracteres locales comunes + dominio con al menos un punto y TLD de 2+ letras.
+    private static final Pattern EMAIL_PATTERN = Pattern.compile(
+            "^[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}$");
+    private static final int EMAIL_MAX_LENGTH = 254;
 
     private final AuthenticationManager authManager;
     private final UserDetailsService userDetailsService;
@@ -92,28 +93,30 @@ public class AuthController {
     }
 
     @PostMapping("/public/login/password")
-    public ResponseEntity<ObjectNode> login(@RequestBody JsonNode body) {
-        String email = requireText(body, "email");
+    public ResponseEntity<?> login(@RequestBody JsonNode body) {
+        String email = requireEmail(body, "email");
         String password = requireText(body, "password");
         Long deviceId = optionalLong(body, "deviceId");
         String deviceSecret = optionalText(body, "deviceSecret");
         String operatingSystem = optionalText(body, "operatingSystem");
         String appVersion = optionalText(body, "appVersion");
 
-        //Autentifica con Spring Security (si fallan las credenciales lanza excepción -> 401) (verifica que el usuario está enabled)
+        //Autentifica con Spring Security. Credenciales inválidas -> BadCredentialsException,
+        //cuenta deshabilitada -> DisabledException. Ambas se traducen en el advice.
         Authentication authResult = authManager.authenticate(
                 new UsernamePasswordAuthenticationToken(email, password));
         UserDetails principal = (UserDetails) authResult.getPrincipal();
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.USER_NOT_FOUND));
 
-        //Bloquea el login si el email no está verificado. Código distinto (403 con body estructurado)
-        //para que el cliente pueda diferenciarlo de credenciales incorrectas (401) y disparar el flujo de verificación.
+        //Bloquea el login si el email no está verificado. Código distinto para que el cliente
+        //pueda diferenciarlo de credenciales incorrectas y disparar el flujo de verificación.
         if (!user.isEmailVerified()) {
-            ObjectNode err = JsonNodeFactory.instance.objectNode();
-            err.put("error", "email_not_verified");
-            err.put("email", user.getEmail());
-            return ResponseEntity.status(FORBIDDEN).body(err);
+            ApiErrorResponse body403 = ApiErrorResponse.of(
+                    ApiErrorCode.EMAIL_NOT_VERIFIED,
+                    ApiErrorCode.EMAIL_NOT_VERIFIED.defaultMessage(),
+                    Map.of("email", user.getEmail()));
+            return ResponseEntity.status(ApiErrorCode.EMAIL_NOT_VERIFIED.status()).body(body403);
         }
 
         //Verificación de dispositivo
@@ -127,9 +130,9 @@ public class AuthController {
                 // El device viejo fue eliminado -> creamos uno nuevo transparentemente
                 device = null;
             } catch (DeviceBlockedException e) {
-                throw new ResponseStatusException(FORBIDDEN, e.getMessage());
+                throw new ApiException(ApiErrorCode.DEVICE_BLOCKED);
             } catch (DeviceAuthenticationException e) {
-                throw new ResponseStatusException(UNAUTHORIZED, e.getMessage());
+                throw new ApiException(ApiErrorCode.DEVICE_INVALID_SECRET, e.getMessage());
             }
         }
         if (device == null) {
@@ -149,13 +152,13 @@ public class AuthController {
 
     @PostMapping("/public/register/password")
     public ResponseEntity<ObjectNode> register(@RequestBody JsonNode body) {
-        String email = requireText(body, "email");
+        String email = requireEmail(body, "email");
         String password = requireText(body, "password");
         String firstName = optionalText(body, "firstName");
         String lastName = optionalText(body, "lastName");
 
         if (userRepository.existsByEmail(email)) {
-            throw new ResponseStatusException(CONFLICT, "Email already registered");
+            throw new ApiException(ApiErrorCode.EMAIL_ALREADY_REGISTERED);
         }
 
         User u = new User();
@@ -185,7 +188,7 @@ public class AuthController {
         } catch (EmailDeliveryException ignored) {
             //Log ya emitido por el service; el cliente puede reintentar con /public/email/verify/request.
         } catch (EmailCodeCooldownException e) {
-            throw new ResponseStatusException(TOO_MANY_REQUESTS, e.getMessage());
+            throw cooldown(e);
         }
 
         ObjectNode resp = JsonNodeFactory.instance.objectNode();
@@ -196,7 +199,7 @@ public class AuthController {
 
     @PostMapping("/public/email/verify/request")
     public ResponseEntity<Void> requestEmailVerification(@RequestBody JsonNode body) {
-        String email = requireText(body, "email");
+        String email = requireEmail(body, "email");
         //Respuesta constante para no filtrar existencia de la cuenta ni estado de verificación.
         userRepository.findByEmail(email).ifPresent(user -> {
             if (!user.isEmailVerified()) {
@@ -205,7 +208,7 @@ public class AuthController {
                 } catch (EmailDeliveryException ignored) {
                     //Silencioso a propósito: mismo comportamiento visible que si el email no existe.
                 } catch (EmailCodeCooldownException e) {
-                    throw new ResponseStatusException(TOO_MANY_REQUESTS, e.getMessage());
+                    throw cooldown(e);
                 }
             }
         });
@@ -214,19 +217,21 @@ public class AuthController {
 
     @PostMapping("/public/email/verify/confirm")
     public ResponseEntity<Void> confirmEmailVerification(@RequestBody JsonNode body) {
-        String email = requireText(body, "email");
+        String email = requireEmail(body, "email");
         String code = requireText(body, "code");
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResponseStatusException(BAD_REQUEST, "Invalid code"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.EMAIL_CODE_INVALID));
         if (user.isEmailVerified()) {
             return ResponseEntity.noContent().build();
         }
         try {
             emailCodeService.verifyAndConsume(user, EmailCode.Purpose.EMAIL_VERIFICATION, code);
-        } catch (EmailCodeNotFoundException | EmailCodeInvalidException e) {
-            throw new ResponseStatusException(BAD_REQUEST, e.getMessage());
+        } catch (EmailCodeNotFoundException e) {
+            throw new ApiException(ApiErrorCode.EMAIL_CODE_NOT_FOUND);
+        } catch (EmailCodeInvalidException e) {
+            throw new ApiException(ApiErrorCode.EMAIL_CODE_INVALID);
         } catch (EmailCodeExpiredException e) {
-            throw new ResponseStatusException(GONE, e.getMessage());
+            throw new ApiException(ApiErrorCode.EMAIL_CODE_EXPIRED);
         }
         user.setEmailVerified(true);
         userRepository.save(user);
@@ -235,7 +240,7 @@ public class AuthController {
 
     @PostMapping("/public/password/reset/request")
     public ResponseEntity<Void> requestPasswordReset(@RequestBody JsonNode body) {
-        String email = requireText(body, "email");
+        String email = requireEmail(body, "email");
         //Respuesta constante para no filtrar existencia de la cuenta.
         userRepository.findByEmail(email).ifPresent(user -> {
             try {
@@ -243,7 +248,7 @@ public class AuthController {
             } catch (EmailDeliveryException ignored) {
                 //Silencioso a propósito: mismo comportamiento visible que si el email no existe.
             } catch (EmailCodeCooldownException e) {
-                throw new ResponseStatusException(TOO_MANY_REQUESTS, e.getMessage());
+                throw cooldown(e);
             }
         });
         return ResponseEntity.accepted().build();
@@ -251,17 +256,19 @@ public class AuthController {
 
     @PostMapping("/public/password/reset/confirm")
     public ResponseEntity<Void> confirmPasswordReset(@RequestBody JsonNode body) {
-        String email = requireText(body, "email");
+        String email = requireEmail(body, "email");
         String code = requireText(body, "code");
         String newPassword = requireText(body, "newPassword");
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResponseStatusException(BAD_REQUEST, "Invalid code"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.EMAIL_CODE_INVALID));
         try {
             emailCodeService.verifyAndConsume(user, EmailCode.Purpose.PASSWORD_RESET, code);
-        } catch (EmailCodeNotFoundException | EmailCodeInvalidException e) {
-            throw new ResponseStatusException(BAD_REQUEST, e.getMessage());
+        } catch (EmailCodeNotFoundException e) {
+            throw new ApiException(ApiErrorCode.EMAIL_CODE_NOT_FOUND);
+        } catch (EmailCodeInvalidException e) {
+            throw new ApiException(ApiErrorCode.EMAIL_CODE_INVALID);
         } catch (EmailCodeExpiredException e) {
-            throw new ResponseStatusException(GONE, e.getMessage());
+            throw new ApiException(ApiErrorCode.EMAIL_CODE_EXPIRED);
         }
         user.setPasswordHash(passwordEncoder.encode(newPassword));
         userRepository.save(user);
@@ -292,7 +299,7 @@ public class AuthController {
     @PostMapping("/secured/logout-all")
     public ResponseEntity<Void> logoutAll(@AuthenticationPrincipal UserDetails principal) {
         User user = userRepository.findByEmail(principal.getUsername())
-                .orElseThrow(() -> new ResponseStatusException(NOT_FOUND, "User not found"));
+                .orElseThrow(() -> new ApiException(ApiErrorCode.USER_NOT_FOUND));
         refreshTokenService.revokeAllForUser(user);
         return ResponseEntity.noContent().build();
     }
@@ -310,10 +317,23 @@ public class AuthController {
         return node;
     }
 
+    private static ApiException cooldown(EmailCodeCooldownException e) {
+        return new ApiException(ApiErrorCode.EMAIL_CODE_COOLDOWN,
+                Map.of("retryAfterSeconds", e.getRetryAfterSeconds()));
+    }
+
+    private static String requireEmail(JsonNode body, String field) {
+        String value = requireText(body, field);
+        if (value.length() > EMAIL_MAX_LENGTH || !EMAIL_PATTERN.matcher(value).matches()) {
+            throw new ApiException(ApiErrorCode.EMAIL_INVALID_FORMAT);
+        }
+        return value;
+    }
+
     private static String requireText(JsonNode body, String field) {
         JsonNode node = body == null ? null : body.get(field);
         if (node == null || node.isNull() || !node.isTextual() || node.asText().isBlank()) {
-            throw new ResponseStatusException(BAD_REQUEST, "Missing or invalid field: " + field);
+            throw ApiException.of(ApiErrorCode.MISSING_FIELD, "field", field);
         }
         return node.asText();
     }
