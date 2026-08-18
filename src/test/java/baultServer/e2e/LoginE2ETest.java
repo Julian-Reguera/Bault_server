@@ -62,6 +62,43 @@ class LoginE2ETest extends AbstractE2ETest {
     }
 
     @Test
+    @DisplayName("Login: tras N fallos consecutivos el email se bloquea (429 LOGIN_RATE_LIMITED); un login correcto tras el lockout limpia el contador")
+    void loginRateLimitLocksAfterFailuresAndClearsOnSuccess() throws Exception {
+        //Config de tests: max-failures=3, lockout-seconds=2. Ver application-test.properties.
+        String email = registerAndVerify();
+
+        //Los 3 primeros fallos devuelven 401 (credenciales malas).
+        for (int i = 0; i < 3; i++) {
+            ResponseEntity<Map<String, Object>> bad = postJson(
+                    "/api/auth/public/login/password",
+                    Map.of("email", email, "password", "WrongPass123!"));
+            assertThat(bad.getStatusCode())
+                    .as("intento fallido #" + (i + 1))
+                    .isEqualTo(HttpStatus.UNAUTHORIZED);
+        }
+
+        //El 4º intento (con la password buena) ya no llega al authManager: 429 con retryAfterSeconds.
+        ResponseEntity<Map<String, Object>> locked = postJson(
+                "/api/auth/public/login/password",
+                Map.of("email", email, "password", DEFAULT_TEST_PASSWORD));
+        assertThat(locked.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(locked.getBody()).containsEntry("code", "LOGIN_RATE_LIMITED");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> details = (Map<String, Object>) locked.getBody().get("details");
+        assertThat(details).containsKey("retryAfterSeconds");
+        assertThat(((Number) details.get("retryAfterSeconds")).longValue()).isGreaterThan(0);
+
+        //Esperamos a que expire el lockout (2s en tests, damos margen).
+        Thread.sleep(2500);
+
+        //Tras el lockout, un login correcto pasa: el contador se limpia y podemos volver a fallar 3x.
+        ResponseEntity<Map<String, Object>> ok = postJson(
+                "/api/auth/public/login/password",
+                Map.of("email", email, "password", DEFAULT_TEST_PASSWORD));
+        assertThat(ok.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
     @DisplayName("Login con email inexistente devuelve 401 (mismo status que credenciales malas)")
     void unknownUserReturns401() {
         ResponseEntity<Map<String, Object>> resp = postJson(

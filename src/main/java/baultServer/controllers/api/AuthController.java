@@ -11,6 +11,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -45,6 +46,7 @@ import baultServer.services.DeviceService;
 import baultServer.services.DeviceService.Registered;
 import baultServer.services.EmailCodeService;
 import baultServer.services.JwtService;
+import baultServer.services.LoginAttemptService;
 import baultServer.services.RefreshTokenService;
 import baultServer.services.RefreshTokenService.Rotated;
 
@@ -68,6 +70,7 @@ public class AuthController {
     private final RefreshTokenService refreshTokenService;
     private final DeviceService deviceService;
     private final EmailCodeService emailCodeService;
+    private final LoginAttemptService loginAttemptService;
     private final String defaultPlanName;
 
     public AuthController(AuthenticationManager authManager,
@@ -79,6 +82,7 @@ public class AuthController {
                           RefreshTokenService refreshTokenService,
                           DeviceService deviceService,
                           EmailCodeService emailCodeService,
+                          LoginAttemptService loginAttemptService,
                           @Value("${bault.plan.default:FREE}") String defaultPlanName) {
         this.authManager = authManager;
         this.userDetailsService = userDetailsService;
@@ -89,6 +93,7 @@ public class AuthController {
         this.refreshTokenService = refreshTokenService;
         this.deviceService = deviceService;
         this.emailCodeService = emailCodeService;
+        this.loginAttemptService = loginAttemptService;
         this.defaultPlanName = defaultPlanName;
     }
 
@@ -101,10 +106,21 @@ public class AuthController {
         String operatingSystem = optionalText(body, "operatingSystem");
         String appVersion = optionalText(body, "appVersion");
 
+        //Rate-limit: bloquea el email si acumula demasiados fallos recientes.
+        //Se comprueba ANTES de tocar authManager para no gastar hashing en peticiones ya bloqueadas.
+        loginAttemptService.assertNotLocked(email);
+
         //Autentifica con Spring Security. Credenciales inválidas -> BadCredentialsException,
         //cuenta deshabilitada -> DisabledException. Ambas se traducen en el advice.
-        Authentication authResult = authManager.authenticate(
-                new UsernamePasswordAuthenticationToken(email, password));
+        Authentication authResult;
+        try {
+            authResult = authManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(email, password));
+        } catch (AuthenticationException e) {
+            loginAttemptService.recordFailure(email);
+            throw e;
+        }
+        loginAttemptService.recordSuccess(email);
         UserDetails principal = (UserDetails) authResult.getPrincipal();
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new ApiException(ApiErrorCode.USER_NOT_FOUND));

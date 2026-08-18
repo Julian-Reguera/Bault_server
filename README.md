@@ -1,4 +1,115 @@
-<!-- README pendiente. Por ahora solo contiene el contrato de códigos de error. -->
+<!-- README pendiente. Por ahora contiene el catalogo de endpoints y el contrato de codigos de error. -->
+
+## API endpoints
+
+Base URL: `/api`. Salvo los `/api/auth/public/**`, todos los endpoints requieren un JWT
+válido en `Authorization: Bearer <accessToken>`. Los endpoints de devices, folders y transfers
+requieren además la autoridad `DEVICE_ACTIVE` (device en estado `ACTIVE`); los de devices
+también aceptan `DEVICE_DISABLED`.
+
+Los errores siguen la forma `{code, message, details?}` documentada en [API error codes](#api-error-codes).
+
+### Autenticación (`/api/auth`)
+
+| Método | Endpoint | Auth | Uso |
+|---|---|---|---|
+| POST | `/public/register/password` | pública | Registra un usuario nuevo con `{email, password, firstName?, lastName?}`. NO emite tokens ni crea Device: envía un código de verificación al email y devuelve `202`. El primer login válido creará el Device. |
+| POST | `/public/email/verify/request` | pública | Reenvía un código de verificación al email si existe. Respuesta constante `202` (no filtra si el email está registrado). |
+| POST | `/public/email/verify/confirm` | pública | Consume el código con `{email, code}` y marca `emailVerified=true`. Sin esto, el login devuelve `403 EMAIL_NOT_VERIFIED`. |
+| POST | `/public/login/password` | pública | Autentica con `{email, password}`. Opcionalmente `{deviceId, deviceSecret}` para reconocer un device existente; si no, registra uno nuevo y devuelve `deviceSecret` **solo esta vez**. Aplica rate-limit (`LOGIN_RATE_LIMITED` a los N fallos). Devuelve `{accessToken, refreshToken, deviceId, deviceSecret?}`. |
+| POST | `/public/refresh` | pública | Rota el refresh token (uno-por-vez). Con `{refreshToken}` devuelve nuevo par de tokens. Detecta reuso (`REFRESH_TOKEN_REUSED`) y revoca todo el device. |
+| POST | `/public/logout` | pública (posesión) | Revoca un refresh token concreto con `{refreshToken}`. Idempotente. |
+| POST | `/public/password/reset/request` | pública | Envía código de reset al `{email}`. Respuesta constante `202` (no filtra existencia). |
+| POST | `/public/password/reset/confirm` | pública | Cambia la contraseña con `{email, code, newPassword}` y revoca **todas** las sesiones del usuario. |
+| POST | `/secured/logout-all` | JWT válido | Revoca todos los refresh tokens del usuario autenticado (cierra sesión en todos sus devices). |
+
+### Usuario (`/api/account`)
+
+| Método | Endpoint | Auth | Uso |
+|---|---|---|---|
+| GET | `/account` | JWT | Devuelve el bundle que necesita la pantalla "Cuenta": datos del usuario + plan activo + uso mensual + fechas de suscripción. Un solo call para toda la vista. |
+
+### Plan de pago (`/api/plans`)
+
+| Método | Endpoint | Auth | Uso |
+|---|---|---|---|
+| GET | `/plans` | JWT | Catálogo de planes disponibles (los que están `enabled=true`). Marca `isCurrent=true` en el que tiene el usuario actualmente para poder pintarlo distinto en la UI. |
+
+### Devices (`/api/devices`)
+
+Autorización: JWT + device en status `ACTIVE` o `DISABLED` (los `BLOCKED`/`REMOVED` cortan en el filtro).
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| GET | `/` | Lista todos los devices del usuario con su `status` y `online` (presencia WS). Es lo que alimenta la pantalla de "mis dispositivos". |
+| GET | `/{deviceId}` | Detalle de un device concreto. Devuelve `404 DEVICE_NOT_FOUND` si está REMOVED (tombstoned). |
+| PATCH | `/{deviceId}` | Renombra el alias del device con `{alias}`. Emite `device.updated` por WS al resto de devices del usuario. |
+| POST | `/{deviceId}/activate` | Mueve `DISABLED → ACTIVE`. Falla con `409 DEVICE_PLAN_LIMIT_REACHED` si el plan del usuario ya tiene el máximo de ACTIVEs. |
+| POST | `/{deviceId}/deactivate` | Mueve `ACTIVE → DISABLED`. Bloqueado durante 7 días desde la última activación (`DEVICE_DEACTIVATE_LOCKED`) para evitar rotar devices para saltarse el límite del plan. |
+| POST | `/{deviceId}/block` | Marca el device como `BLOCKED` (bloqueo lado servidor). Revoca todos sus refresh tokens; el device recibirá `403 DEVICE_BLOCKED` en cualquier request. |
+| POST | `/{deviceId}/unblock` | Devuelve un `BLOCKED` a `DISABLED`. Solo aplica sobre devices `BLOCKED`. |
+| DELETE | `/{deviceId}` | Marca el device como `REMOVED` (tombstone; no borra la fila para preservar histórico). Revoca sus refresh tokens y emite `device.removed`. |
+
+### Folders (`/api/folders`)
+
+Autorización: JWT + `DEVICE_ACTIVE`.
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| GET | `/` | Lista todas las folders compartidas de **cualquier** device del usuario (para vistas cross-device). |
+| GET | `/device/{deviceId}` | Folders compartidas por un device concreto del usuario. Incluye `folder-status` con el status del device. |
+| GET | `/shared-with-me` | Folders que **otros** devices del mismo usuario han compartido con el device caller. Le sirve al cliente para saber a qué destinos puede escribir/leer. |
+| POST | `/` | Crea una folder compartida con `{path, sharing?, encrypted?}`. `sharing` ∈ `{NONE, READ, READ_WRITE}` (default `NONE`). Si `encrypted=true`, genera una DEK AES-256 y la persiste envuelta con el KEK activo. |
+| PATCH | `/{folderId}` | Cambia el nivel de sharing con `{sharing}`. Solo puede llamarlo el device dueño. |
+| DELETE | `/{folderId}` | Deja de compartir la folder (soft: `enabled=false`). Solo el owner device. |
+| GET | `/browse/{folderId}?path=...` | Lista el contenido de una folder haciendo RPC via WS al device dueño (que es quien tiene el filesystem real). Requiere que el owner esté online. `path` es una subruta dentro de la folder; sin `..` (traversal blocked). |
+
+### Transferencias (`/api/transfers`)
+
+Autorización: JWT + `DEVICE_ACTIVE`. Modelo de tres tipos según quién inicia:
+- **download-request**: `owner = receiver`, tira del sender.
+- **upload-request**: `owner = sender`, empuja al receiver.
+- **third-party-request**: `owner ≠ sender ≠ receiver`, un tercer device orquesta.
+
+#### Histórico y utilidades
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| GET | `/?status=&deviceId=&senderId=&receiverId=&q=&cursor=&size=` | Listado paginado (cursor-based) del histórico de transferencias del usuario. `status` ∈ `{all, ok, active, failed}`. Devuelve `{items, nextCursor, filters}` con los dropdowns de senders/receivers ya calculados. |
+| GET | `/export-csv?...` | Exporta el histórico filtrado como CSV en streaming. Mismos filtros que el listado. |
+| POST | `/{transferId}/retry` | Crea una copia PENDING de una transferencia FAILED/DENIED/CANCELLED, revalidando que sender/receiver siguen ACTIVE y que la folder implicada sigue compartida con el sharing requerido. Solo el owner original puede reintentar. |
+
+#### Crear transferencias
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| POST | `/download-request` | El caller (receiver) pide descargar `originPath` de una folder compartida (`READ`+) del sender. Body: `{senderDeviceId, originFolderId, originPath, destinationPath?, sizeBytes}`. Notifica al sender por WS con `transfer.upload-requested`. Header opcional `Idempotency-Key`. |
+| POST | `/upload-request` | El caller (sender) ofrece enviar `originPath` a una folder compartida (`READ_WRITE`+) del receiver. Body: `{receiverDeviceId, destinationFolderId, originPath, destinationPath?, sizeBytes}`. Notifica al receiver con `transfer.download-offered`. Header opcional `Idempotency-Key`. |
+| POST | `/third-party-request` | El caller (owner, tercer device) orquesta una transferencia entre sender y receiver (ambos del mismo usuario, ninguno = owner). Body: `{senderDeviceId, receiverDeviceId, originFolderId, destinationFolderId, originPath, destinationPath?, sizeBytes}`. Notifica a los DOS peers. Header opcional `Idempotency-Key`. |
+
+#### Descubrimiento y consulta
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| GET | `/pending-as-peer` | Devuelve las transferencias PENDING de tipo third-party en las que el device caller participa (como sender o receiver) pero **no** es el owner. Útil como catch-up si perdió la notificación WS por estar offline. Cada item incluye `role: "sender"|"receiver"` para saber qué acción debe tomar. |
+| GET | `/{transferId}/keys` | Devuelve, por folder implicada, si está cifrada y (solo al device que la necesita) la DEK en claro Base64 para cifrar/descifrar en el cliente. Sender recibe la DEK del origin; receiver la del destination. |
+
+#### Ejecución del pipe
+
+| Método | Endpoint | Uso |
+|---|---|---|
+| GET | `/{transferId}/download` | El receiver reclama el pipe. Handshake simétrico con `/upload`: si es el primero en llegar avisa al sender con `transfer.download-started` y bloquea hasta que el sender también reclame el pipe. Cuando ambos han hecho el handshake, uno de los dos hace la transición `PENDING → IN_PROGRESS` y se streamean los bytes. Aplica throttling según plan y techo global. Si el sender no llega antes de 30 s, la transferencia se queda en `PENDING` y devuelve `504 TRANSFER_UPLOADER_TIMEOUT`. |
+| POST | `/{transferId}/upload` | El sender entrega los bytes (body `application/octet-stream`). Headers: `X-Filename?`, `X-Content-Type?`, `Content-Length?`. Handshake simétrico con `/download`: puede llegar primero o segundo. Si llega primero avisa al receiver con `transfer.upload-started` y bloquea hasta que el receiver reclame el pipe. Si el receiver no llega antes de 30 s, la transferencia se queda en `PENDING` y devuelve `504 TRANSFER_DOWNLOADER_TIMEOUT`. |
+| DELETE | `/{transferId}/cancel` | El owner cancela. Aplica en `PENDING` o `IN_PROGRESS`; en `IN_PROGRESS` aborta el pipe (interrumpe el streaming en curso o desbloquea al peer que esperaba el handshake). Emite `transfer.updated CANCELLED`. |
+| POST | `/{transferId}/deny` | El peer (no el owner) rechaza. Aplica en `PENDING` o `IN_PROGRESS`; en `IN_PROGRESS` aborta el pipe. Emite `transfer.denied` al owner. |
+
+### WebSocket (`/api/ws`)
+
+Endpoint STOMP-over-WebSocket con JWT en el handshake (`Authorization: Bearer ...`).
+
+- Broker prefixes: `/topic`, `/queue`. App prefix: `/app`. User prefix: `/user`.
+- Presencia: el device se marca `online` cuando se suscribe a `/queue/device.{deviceId}` (canal RPC exclusivo por device).
+- Fan-out de eventos del usuario: `/user/queue/events` (creación/actualización de devices, folders, transfers, presencia).
 
 ## API error codes
 
@@ -41,6 +152,7 @@ Cualquier código nuevo **debe** añadirse ahí y a esta tabla en el mismo commi
 | `ACCESS_DENIED` | 403 | Autenticado pero sin permisos suficientes. |
 | `USER_NOT_FOUND` | 404 | El usuario referenciado no existe. |
 | `USER_DISABLED` | 403 | La cuenta está deshabilitada (Spring Security `DisabledException`/`LockedException`). |
+| `LOGIN_RATE_LIMITED` | 429 | Demasiados fallos de login para ese email; bloqueado temporalmente. `details.retryAfterSeconds`. Umbrales configurables vía `bault.security.login.{max-failures,window-seconds,lockout-seconds}` (defaults: 5 fallos, ventana 900s, lockout 300s). |
 
 ### Refresh tokens
 

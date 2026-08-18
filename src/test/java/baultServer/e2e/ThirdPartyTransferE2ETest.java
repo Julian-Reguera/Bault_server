@@ -210,7 +210,7 @@ class ThirdPartyTransferE2ETest extends AbstractE2ETest {
                             && "PENDING".equals(e.get("data").get("status").asString()),
                     3);
 
-            // 10. Lanzamos download (receiver) → bloquea en awaitMetadata hasta que upload publique.
+            // 10. Lanzamos download y upload en paralelo (handshake simétrico).
             CompletableFuture<byte[]> downloadFuture = CompletableFuture.supplyAsync(() ->
                     client().get()
                             .uri("/api/transfers/" + transferId + "/download")
@@ -219,14 +219,6 @@ class ThirdPartyTransferE2ETest extends AbstractE2ETest {
                             .body(byte[].class),
                     pool);
 
-            //Esperamos al IN_PROGRESS antes de disparar el upload (mismo patrón que TransferE2ETest).
-            events.awaitOne(e ->
-                    "transfer.updated".equals(e.get("op").asString())
-                            && e.get("data").get("transferId").asLong() == transferId
-                            && "IN_PROGRESS".equals(e.get("data").get("status").asString()),
-                    5);
-
-            // 11. Lanzamos upload (sender) en paralelo
             CompletableFuture<ResponseEntity<Void>> uploadFuture = CompletableFuture.supplyAsync(() ->
                     client().post()
                             .uri("/api/transfers/" + transferId + "/upload")
@@ -240,7 +232,7 @@ class ThirdPartyTransferE2ETest extends AbstractE2ETest {
                             .toBodilessEntity(),
                     pool);
 
-            // 12. Ambos completan; bytes idénticos y status HTTP correctos
+            // 11. Ambos completan; bytes idénticos y status HTTP correctos
             byte[] received = downloadFuture.get(15, TimeUnit.SECONDS);
             ResponseEntity<Void> uploadResp = uploadFuture.get(15, TimeUnit.SECONDS);
 
@@ -249,14 +241,19 @@ class ThirdPartyTransferE2ETest extends AbstractE2ETest {
                     .as("los bytes que recibe el receiver deben coincidir con los del sender")
                     .isEqualTo(fileBytes);
 
-            // 13. transfer.updated COMPLETED
+            // 12. Eventos IN_PROGRESS + COMPLETED
+            events.awaitOne(e ->
+                    "transfer.updated".equals(e.get("op").asString())
+                            && e.get("data").get("transferId").asLong() == transferId
+                            && "IN_PROGRESS".equals(e.get("data").get("status").asString()),
+                    5);
             events.awaitOne(e ->
                     "transfer.updated".equals(e.get("op").asString())
                             && e.get("data").get("transferId").asLong() == transferId
                             && "COMPLETED".equals(e.get("data").get("status").asString()),
                     5);
 
-            // 14. Tras completarse ya no debe aparecer en /pending-as-peer
+            // 13. Tras completarse ya no debe aparecer en /pending-as-peer
             ResponseEntity<Map<String, Object>> senderPendingAfter = getJson(
                     "/api/transfers/pending-as-peer", sender.accessToken());
             @SuppressWarnings("unchecked")

@@ -5,6 +5,7 @@ import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -60,6 +61,18 @@ public class GlobalApiExceptionHandler {
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ApiErrorResponse> handleAccessDenied(AccessDeniedException ex) {
         return respond(ApiErrorCode.ACCESS_DENIED, ex.getMessage(), null);
+    }
+
+    /**
+     * Otro request ganó la carrera en un check-then-write sobre {@code Transfer} (protegido
+     * por {@code @Version}). El caller debe releer el estado y decidir si reintentar.
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ApiErrorResponse> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        log.debug("Optimistic lock conflict — concurrent state transition on Transfer", ex);
+        return respond(ApiErrorCode.TRANSFER_STATE_CONFLICT,
+                "Concurrent state transition; retry after re-reading state",
+                Map.of("reason", "optimistic_lock"));
     }
 
     // --- Legacy / bordes ---

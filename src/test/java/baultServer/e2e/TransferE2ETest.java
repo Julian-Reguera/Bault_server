@@ -37,15 +37,11 @@ import static org.awaitility.Awaitility.await;
  *   <li>Todos los devices del user reciben {@code transfer.created} por
  *       {@code /user/queue/events}.</li>
  *   <li>En paralelo: receiver lanza {@code GET /download} y sender {@code POST /upload}.
- *       El server actúa como pipe: los bytes fluyen sender → server → receiver sin
- *       tocar disco.</li>
+ *       El handshake del pipe es simétrico: el primero que llega bloquea y avisa al peer,
+ *       el segundo desbloquea a los dos. Da igual quién arranque primero.</li>
  *   <li>El receiver acumula los bytes y valida que coinciden con lo que envió el sender.</li>
- *   <li>Se emite {@code transfer.updated} con {@code status=COMPLETED}.</li>
+ *   <li>Se emiten {@code transfer.updated IN_PROGRESS} y luego {@code COMPLETED}.</li>
  * </ol>
- * <p>
- * Para coordinar sin race condition: se espera al evento {@code transfer.updated IN_PROGRESS}
- * antes de disparar el upload, garantizando que el server ya está en la fase
- * {@code awaitMetadata} del pipe.
  */
 class TransferE2ETest extends AbstractE2ETest {
 
@@ -135,9 +131,9 @@ class TransferE2ETest extends AbstractE2ETest {
                             && "PENDING".equals(e.get("data").get("status").asString()),
                     3);
 
-            // 9. Lanzamos download en un hilo. Se bloquea en awaitMetadata hasta que el upload
-            //    publique metadata, así que necesitamos que la transferencia esté IN_PROGRESS
-            //    antes de disparar el upload.
+            // 9. Lanzamos download y upload en paralelo. Con handshake simétrico da igual quién
+            //    llegue primero: el que llegue antes bloquea en awaitRendezvous y el otro
+            //    los desbloquea a los dos.
             CompletableFuture<byte[]> downloadFuture = CompletableFuture.supplyAsync(() ->
                     client().get()
                             .uri("/api/transfers/" + transferId + "/download")
@@ -146,15 +142,6 @@ class TransferE2ETest extends AbstractE2ETest {
                             .body(byte[].class),
                     pool);
 
-            //Esperamos al evento transfer.updated IN_PROGRESS antes del upload: garantiza
-            //que el server ya está en fase awaitMetadata y no rechazará el upload con CONFLICT.
-            events.awaitOne(e ->
-                    "transfer.updated".equals(e.get("op").asString())
-                            && e.get("data").get("transferId").asLong() == transferId
-                            && "IN_PROGRESS".equals(e.get("data").get("status").asString()),
-                    5);
-
-            // 10. Lanzamos upload en paralelo
             CompletableFuture<ResponseEntity<Void>> uploadFuture = CompletableFuture.supplyAsync(() ->
                     client().post()
                             .uri("/api/transfers/" + transferId + "/upload")
@@ -168,7 +155,7 @@ class TransferE2ETest extends AbstractE2ETest {
                             .toBodilessEntity(),
                     pool);
 
-            // 11. Ambos completan; validamos bytes idénticos y status HTTP
+            // 10. Ambos completan; validamos bytes idénticos y status HTTP
             byte[] received = downloadFuture.get(15, TimeUnit.SECONDS);
             ResponseEntity<Void> uploadResp = uploadFuture.get(15, TimeUnit.SECONDS);
 
@@ -177,7 +164,12 @@ class TransferE2ETest extends AbstractE2ETest {
                     .as("los bytes que recibe el receiver deben coincidir exactamente con los que envió el sender")
                     .isEqualTo(fileBytes);
 
-            // 12. Evento transfer.updated COMPLETED
+            // 11. Eventos transfer.updated IN_PROGRESS y COMPLETED (en ese orden temporal).
+            events.awaitOne(e ->
+                    "transfer.updated".equals(e.get("op").asString())
+                            && e.get("data").get("transferId").asLong() == transferId
+                            && "IN_PROGRESS".equals(e.get("data").get("status").asString()),
+                    5);
             JsonNode completed = events.awaitOne(e ->
                     "transfer.updated".equals(e.get("op").asString())
                             && e.get("data").get("transferId").asLong() == transferId

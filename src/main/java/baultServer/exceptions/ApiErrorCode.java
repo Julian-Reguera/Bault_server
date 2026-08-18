@@ -27,6 +27,7 @@ public enum ApiErrorCode {
     ACCESS_DENIED(HttpStatus.FORBIDDEN, "Access denied"),
     USER_NOT_FOUND(HttpStatus.NOT_FOUND, "User not found"),
     USER_DISABLED(HttpStatus.FORBIDDEN, "User disabled"),
+    LOGIN_RATE_LIMITED(HttpStatus.TOO_MANY_REQUESTS, "Too many failed login attempts"),
 
     // ---------- Refresh tokens ----------
     REFRESH_TOKEN_INVALID(HttpStatus.UNAUTHORIZED, "Invalid refresh token"),

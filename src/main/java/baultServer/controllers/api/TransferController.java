@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -430,6 +431,14 @@ public class TransferController {
         return node;
     }
 
+    /**
+     * El owner cancela la transferencia. Admite {@code PENDING} (aún no ha empezado el
+     * handshake) e {@code IN_PROGRESS} (uno o los dos peers ya están en el pipe, quizá
+     * transmitiendo). En ambos casos se aborta el pipe si existe: eso despierta al peer
+     * bloqueado en el handshake o interrumpe el streaming en curso con IOException que
+     * el catch de {@code /upload} o {@code /download} traduce; sus {@code markFailed}
+     * quedan pisados por el {@code CANCELLED} gracias a {@code @Version}.
+     */
     @DeleteMapping("/{transferId}/cancel")
     public ResponseEntity<Void> cancel(@PathVariable Long transferId,
                                        @AuthenticationPrincipal UserDetails principal,
@@ -443,7 +452,8 @@ public class TransferController {
         if (!transfer.getOwner().getUser().getId().equals(user.getId())) {
             throw new ApiException(ApiErrorCode.TRANSFER_NOT_OWNED_BY_USER);
         }
-        if (transfer.getStatus() != Transfer.Status.PENDING) {
+        if (transfer.getStatus() != Transfer.Status.PENDING
+                && transfer.getStatus() != Transfer.Status.IN_PROGRESS) {
             throw new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
                     Map.of("action", "cancel", "status", transfer.getStatus().name()));
         }
@@ -453,6 +463,12 @@ public class TransferController {
         transfer.setCompletedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
         eventBroadcaster.transferUpdated(user.getId(), transfer.getId(), transfer.getStatus());
+
+        StreamingPipe pipe = pipeRegistry.get(transferId);
+        if (pipe != null) {
+            pipe.abort(new RuntimeException("Cancelled by owner"));
+        }
+
         return ResponseEntity.noContent().build();
     }
 
@@ -501,6 +517,16 @@ public class TransferController {
         return ResponseEntity.noContent().build();
     }
 
+    /**
+     * El sender entrega los bytes. El handshake es simétrico con {@code /download}:
+     * el primer endpoint en llegar reclama su plaza, avisa por WS al peer y bloquea en
+     * {@code awaitRendezvous}. Cuando ambos peers han reclamado, uno de los dos (elegido
+     * por {@code tryClaimStateTransition}) hace el {@code PENDING → IN_PROGRESS} en BD y
+     * comienza el streaming.
+     *
+     * Estados admitidos como entrada: solo {@code PENDING}. Un {@code IN_PROGRESS} indica
+     * que ya hay handshake completo — no se admite un segundo uploader.
+     */
     @PostMapping(path = "/{transferId}/upload", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<Void> upload(@PathVariable Long transferId,
                                        @RequestHeader(name = "X-Filename", required = false) String filename,
@@ -512,10 +538,9 @@ public class TransferController {
         Device caller = currentDevice(request, user);
         Transfer transfer = transferRepository.findById(transferId)
                 .orElseThrow(() -> new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND));
-        //Upload solo si el downloader ya ha empezado (transfer en IN_PROGRESS)
-        if (transfer.getStatus() != Transfer.Status.IN_PROGRESS) {
+        if (transfer.getStatus() != Transfer.Status.PENDING) {
             throw new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
-                    Map.of("action", "upload", "expected", Transfer.Status.IN_PROGRESS.name(),
+                    Map.of("action", "upload", "expected", Transfer.Status.PENDING.name(),
                             "status", transfer.getStatus().name()));
         }
 
@@ -535,49 +560,84 @@ public class TransferController {
             throw new ApiException(ApiErrorCode.TRANSFER_UPLOAD_IN_PROGRESS);
         }
 
-        CountingOutputStream counting = new CountingOutputStream(pipe.sink());
-
-        try {
-            pipe.publishMetadata(filename, contentType, declaredSize);
-
+        //Si el downloader aún no ha llegado, avisamos por WS y esperamos rendezvous.
+        //Si ya está, no reenviamos WS: recibirá los bytes en cuanto publiquemos metadata.
+        boolean firstArriver = !pipe.isDownloaderClaimed();
+        if (firstArriver) {
             ObjectNode uploadStartedData = JsonNodeFactory.instance.objectNode();
             uploadStartedData.put("transferId", transferId);
             if (filename != null) uploadStartedData.put("filename", filename);
             if (contentType != null) uploadStartedData.put("contentType", contentType);
             if (declaredSize != null) uploadStartedData.put("sizeBytes", declaredSize);
             notifyDevice(transfer.getReceiver().getId(), "transfer.upload-started", uploadStartedData);
+        }
 
-            if (!pipe.awaitRendezvous(RENDEZVOUS_TIMEOUT_MS)) {
+        CountingOutputStream counting = new CountingOutputStream(pipe.sink());
+        boolean streamingStarted = false;
+
+        try {
+            boolean rendezvous = pipe.awaitRendezvous(RENDEZVOUS_TIMEOUT_MS);
+            if (!rendezvous) {
+                //El peer nunca llegó. Dejamos la transferencia en PENDING (el cliente
+                //puede reintentar). Liberamos el pipe para que un segundo intento cree
+                //uno nuevo.
                 pipe.abort(new RuntimeException("Downloader did not arrive"));
-                markFailed(transfer, counting.getCount(), "Downloader did not connect");
                 throw new ApiException(ApiErrorCode.TRANSFER_DOWNLOADER_TIMEOUT);
             }
+            //Rendezvous alcanzado o el pipe fue abortado externamente (deny/cancel).
+            //Si fue abortado, releer BD nos dice qué código devolver.
+            if (pipe.isAborted()) {
+                throw stateConflictAfterAbort(transferId, "upload");
+            }
 
+            if (pipe.tryClaimStateTransition()) {
+                try {
+                    markInProgress(transfer);
+                } catch (OptimisticLockingFailureException lockConflict) {
+                    //Otro path (deny/cancel) transicionó primero. Abortamos y devolvemos
+                    //el estado real al cliente.
+                    pipe.abort(lockConflict);
+                    throw stateConflictAfterAbort(transferId, "upload");
+                }
+            }
+
+            pipe.publishMetadata(filename, contentType, declaredSize);
+
+            streamingStarted = true;
             try (InputStream in = request.getInputStream()) {
                 in.transferTo(counting);
             } finally {
                 try { pipe.sink().close(); } catch (Exception ignored) {}
             }
 
-            transfer.setSizeBytes(counting.getCount());
-            transferRepository.save(transfer);
+            //No persistimos aqui: el cierre (COMPLETED + sizeBytes) lo hace markCompleted en
+            //el lado del /download con su propio CountingOutputStream. Asi solo un lado escribe
+            //el estado final y evitamos carrera con @Version entre este save y markCompleted.
             return ResponseEntity.noContent().build();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             pipe.abort(e);
-            markFailed(transfer, counting.getCount(), "Interrupted");
+            if (streamingStarted) markFailed(transfer, counting.getCount(), "Interrupted");
             throw new ApiException(ApiErrorCode.TRANSFER_INTERRUPTED);
         } catch (ApiException e) {
             throw e;
         } catch (Exception e) {
             pipe.abort(e);
-            markFailed(transfer, counting.getCount(), e.getMessage());
+            //Solo marcamos FAILED si llegamos a empezar a streamear. Antes del streaming
+            //los errores dejan la transferencia como esté (PENDING para timeouts, o el
+            //estado terminal que fijó deny/cancel).
+            if (streamingStarted) markFailed(transfer, counting.getCount(), e.getMessage());
             throw new ApiException(ApiErrorCode.TRANSFER_UPLOAD_FAILED, e.getMessage());
         } finally {
             pipe.release();
         }
     }
 
+    /**
+     * El receiver reclama el pipe. Simétrico con {@code /upload}: si es el primero en llegar,
+     * avisa por WS al sender y bloquea en {@code awaitRendezvous}. Tras el handshake, uno de
+     * los dos endpoints hace el {@code PENDING → IN_PROGRESS} y comienza el streaming.
+     */
     @GetMapping("/{transferId}/download")
     public ResponseEntity<StreamingResponseBody> download(@PathVariable Long transferId,
                                                           @AuthenticationPrincipal UserDetails principal,
@@ -611,11 +671,6 @@ public class TransferController {
             }
         }
 
-        transfer.setStatus(Transfer.Status.IN_PROGRESS);
-        transfer.setStartedAt(ZonedDateTime.now());
-        transferRepository.save(transfer);
-        eventBroadcaster.transferUpdated(user.getId(), transfer.getId(), transfer.getStatus());
-
         long throttleBytesPerSecond = resolveDownloadRate(user);
 
         StreamingPipe pipe = pipeRegistry.getOrCreate(transferId);
@@ -623,9 +678,44 @@ public class TransferController {
             throw new ApiException(ApiErrorCode.TRANSFER_DOWNLOAD_IN_PROGRESS);
         }
 
-        ObjectNode downloadStartedData = JsonNodeFactory.instance.objectNode();
-        downloadStartedData.put("transferId", transferId);
-        notifyDevice(transfer.getSender().getId(), "transfer.download-started", downloadStartedData);
+        boolean firstArriver = !pipe.isUploaderClaimed();
+        if (firstArriver) {
+            ObjectNode downloadStartedData = JsonNodeFactory.instance.objectNode();
+            downloadStartedData.put("transferId", transferId);
+            notifyDevice(transfer.getSender().getId(), "transfer.download-started", downloadStartedData);
+        }
+
+        //Handshake ANTES de exponer headers. Todo lo que pueda fallar aquí debe liberar el pipe
+        //y devolver una ApiException — a partir del return de este método el cliente ya recibió
+        //200 OK y no podemos cambiar el status.
+        try {
+            boolean rendezvous = pipe.awaitRendezvous(RENDEZVOUS_TIMEOUT_MS);
+            if (!rendezvous) {
+                pipe.abort(new RuntimeException("Uploader did not arrive"));
+                //Transfer se queda en PENDING (política del usuario).
+                throw new ApiException(ApiErrorCode.TRANSFER_UPLOADER_TIMEOUT);
+            }
+            if (pipe.isAborted()) {
+                throw stateConflictAfterAbort(transferId, "download");
+            }
+
+            if (pipe.tryClaimStateTransition()) {
+                try {
+                    markInProgress(transfer);
+                } catch (OptimisticLockingFailureException lockConflict) {
+                    pipe.abort(lockConflict);
+                    throw stateConflictAfterAbort(transferId, "download");
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            pipe.abort(e);
+            pipe.release();
+            throw new ApiException(ApiErrorCode.TRANSFER_INTERRUPTED);
+        } catch (ApiException e) {
+            pipe.release();
+            throw e;
+        }
 
         StreamingPipe.Metadata meta;
         try {
@@ -648,7 +738,7 @@ public class TransferController {
             throw new ApiException(code, details);
         } catch (TimeoutException e) {
             pipe.abort(e);
-            markFailed(transfer, 0L, "Uploader did not start");
+            markFailed(transfer, 0L, "Uploader did not publish metadata");
             pipe.release();
             throw new ApiException(ApiErrorCode.TRANSFER_UPLOADER_TIMEOUT);
         }
@@ -669,7 +759,7 @@ public class TransferController {
             try (InputStream source = pipe.source()) {
                 source.transferTo(counting);
                 counting.flush();
-                markCompleted(transfer);
+                markCompleted(transfer, counting.getCount());
             } catch (Exception e) {
                 pipe.abort(e);
                 markFailed(transfer, counting.getCount(), e.getMessage());
@@ -734,12 +824,52 @@ public class TransferController {
         return transfer;
     }
 
-    private void markCompleted(Transfer transfer) {
-        transfer.setStatus(Transfer.Status.COMPLETED);
-        transfer.setCompletedAt(ZonedDateTime.now());
+    /**
+     * Ejecuta la transición diferida PENDING → IN_PROGRESS. Se llama después del handshake,
+     * por UN solo endpoint (elegido por {@code pipe.tryClaimStateTransition}). Puede fallar
+     * con {@code OptimisticLockingFailureException} si un {@code /deny} o {@code /cancel}
+     * concurrente ya cambió el estado — el caller debe traducirlo a {@code TRANSFER_STATE_CONFLICT}.
+     */
+    private void markInProgress(Transfer transfer) {
+        transfer.setStatus(Transfer.Status.IN_PROGRESS);
+        transfer.setStartedAt(ZonedDateTime.now());
         transferRepository.save(transfer);
         eventBroadcaster.transferUpdated(transfer.getOwner().getUser().getId(),
                 transfer.getId(), transfer.getStatus());
+    }
+
+    /**
+     * Tras un abort del pipe (por timeout del peer, deny o cancel concurrente), releemos la
+     * transferencia y devolvemos {@code TRANSFER_STATE_CONFLICT} con el estado real. Si el
+     * estado no cambió, el abort vino de nuestro propio timeout — reportamos el peer timeout.
+     */
+    private ApiException stateConflictAfterAbort(Long transferId, String action) {
+        Transfer fresh = transferRepository.findById(transferId).orElse(null);
+        if (fresh == null) {
+            return new ApiException(ApiErrorCode.TRANSFER_NOT_FOUND);
+        }
+        Transfer.Status status = fresh.getStatus();
+        if (status == Transfer.Status.PENDING) {
+            //Pipe abortado sin transición de estado: el otro peer se rindió.
+            return new ApiException("upload".equals(action)
+                    ? ApiErrorCode.TRANSFER_DOWNLOADER_TIMEOUT
+                    : ApiErrorCode.TRANSFER_UPLOADER_TIMEOUT);
+        }
+        return new ApiException(ApiErrorCode.TRANSFER_STATE_CONFLICT,
+                Map.of("action", action, "status", status.name()));
+    }
+
+    private void markCompleted(Transfer transfer, long bytesTransferred) {
+        try {
+            transfer.setStatus(Transfer.Status.COMPLETED);
+            transfer.setSizeBytes(bytesTransferred);
+            transfer.setCompletedAt(ZonedDateTime.now());
+            transferRepository.save(transfer);
+            eventBroadcaster.transferUpdated(transfer.getOwner().getUser().getId(),
+                    transfer.getId(), transfer.getStatus());
+        } catch (OptimisticLockingFailureException ignored) {
+            //Otro endpoint (p.ej. /deny) transicionó primero; respetamos su estado.
+        }
     }
 
     private Map<String, Object> idempotentResponse(Device owner, String idempotencyKey) {

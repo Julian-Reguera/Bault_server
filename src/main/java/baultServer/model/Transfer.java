@@ -15,6 +15,7 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.SequenceGenerator;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import lombok.Data;
 
 @Entity
@@ -32,6 +33,18 @@ public class Transfer {
     @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "gen")
     @SequenceGenerator(name = "gen", sequenceName = "gen")
     private Long id;
+
+    /**
+     * Optimistic locking: Hibernate añade {@code WHERE version=?} a cada UPDATE y bump-ea el
+     * valor. Si dos transiciones concurrentes leen la misma versión y ambas intentan escribir,
+     * la perdedora recibe {@code OptimisticLockingFailureException}. Protege las carreras
+     * entre {@code /upload} y {@code /download} (transición diferida a IN_PROGRESS tras el
+     * handshake) y entre esos y {@code /cancel}/{@code /deny}, que pueden dispararse durante
+     * el handshake o mientras se transmite. El endpoint que pierde el {@code UPDATE} debe
+     * abortar el pipe y devolver {@code TRANSFER_STATE_CONFLICT} con el estado real.
+     */
+    @Version
+    private Long version;
 
     @Enumerated(EnumType.STRING)
     private Status status;
